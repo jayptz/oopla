@@ -68,6 +68,18 @@ final class ClaudePlanner: PlannerProviding {
         Available tools:
         \(tools)
 
+        Tool notes:
+        - app_launcher_tool can launch ANY application installed on the user's Mac. \
+        Pass the app's common display name exactly as the user would say it (e.g. "Spotify", \
+        "Cursor", "Arc", "Warp", "VS Code", "Xcode", "Discord", "Notion", "Figma"). \
+        The tool resolves common name variants automatically, so use natural names — \
+        do not fabricate bundle identifiers or file paths for apps.
+        - browser_open_url_tool opens a URL in the default browser. Use it for web destinations \
+        (YouTube, Gmail, GitHub, etc.) rather than launching a browser app separately unless \
+        the user specifically names a browser.
+        - For "open <app> and go to <url>" commands, use app_launcher_tool first then \
+        browser_open_url_tool for the URL.
+
         Local search candidates already found:
         \(candidateList.isEmpty ? "(none)" : candidateList)
 

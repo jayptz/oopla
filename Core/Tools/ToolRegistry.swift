@@ -42,35 +42,110 @@ final class ToolRegistry {
 
 struct AppLauncherTool: ToolProtocol {
     let name = "app_launcher_tool"
-    let description = "Launches a macOS application by name."
-    let inputSchema = ["appName": "String"]
+    let description = """
+        Launches any installed macOS application by its common display name. \
+        Works with any app the user has installed. Pass the app's common name \
+        as the user would say it (e.g. "Cursor", "Arc", "Spotify", "VS Code", \
+        "Chrome"). The tool resolves common name variants automatically.
+        """
+    let inputSchema  = ["appName": "String — common display name of the app"]
     let resultSchema = ["launchedApp": "String"]
     let safetyLevel: SafetyLevel = .safe
 
-    func execute(arguments: [String : String]) async throws -> ToolResult {
-        guard let appName = arguments["appName"], !appName.isEmpty else {
+    // Maps spoken/informal names → actual .app bundle names.
+    // Only entries where the two differ are needed here.
+    private static let aliases: [String: String] = [
+        // Browsers
+        "chrome":                  "Google Chrome",
+        "google chrome":           "Google Chrome",
+        "brave":                   "Brave Browser",
+        // Developer tools
+        "vs code":                 "Visual Studio Code",
+        "vscode":                  "Visual Studio Code",
+        "visual studio code":      "Visual Studio Code",
+        "iterm":                   "iTerm",
+        "iterm2":                  "iTerm",
+        "intellij":                "IntelliJ IDEA",
+        "sublime":                 "Sublime Text",
+        // Communication / productivity
+        "zoom":                    "zoom.us",
+        "teams":                   "Microsoft Teams",
+        "microsoft teams":         "Microsoft Teams",
+        "google meet":             "Google Meet",
+        // Password managers / utilities
+        "1password":               "1Password 7 - Password Manager",
+        "cleanmymac":              "CleanMyMac X",
+    ]
+
+    // Directories searched in priority order.
+    private static let searchRoots: [String] = [
+        "/Applications",
+        NSHomeDirectory() + "/Applications",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+    ]
+
+    func execute(arguments: [String: String]) async throws -> ToolResult {
+        guard let rawName = arguments["appName"], !rawName.isEmpty else {
             return ToolResult(toolName: name, success: false, message: "Missing appName.", payload: [:])
         }
-        let appURL = URL(fileURLWithPath: "/Applications/\(appName).app")
-        guard FileManager.default.fileExists(atPath: appURL.path) else {
-            return ToolResult(
-                toolName: name,
-                success: false,
-                message: "Could not find \(appName) in /Applications.",
-                payload: ["launchedApp": appName]
-            )
+
+        // 1. Resolve known alias (case-insensitive).
+        let resolved = Self.aliases[rawName.lowercased()] ?? rawName
+
+        // 2. Exact match in each search root.
+        for root in Self.searchRoots {
+            let url = URL(fileURLWithPath: "\(root)/\(resolved).app")
+            if FileManager.default.fileExists(atPath: url.path) {
+                return await open(url, displayName: resolved)
+            }
         }
-        let configuration = NSWorkspace.OpenConfiguration()
+
+        // 3. Fuzzy fallback: scan /Applications and /System/Applications for
+        //    any bundle whose filename starts with or contains the resolved name.
+        //    Catches version-suffixed names like "CleanMyMac X.app".
+        let fuzzyRoots = ["/Applications", "/System/Applications"]
+        for root in fuzzyRoots {
+            if let url = fuzzyFind(name: resolved, in: root) {
+                return await open(url, displayName: resolved)
+            }
+        }
+
+        return ToolResult(
+            toolName: name,
+            success: false,
+            message: "'\(resolved)' does not appear to be installed.",
+            payload: [:]
+        )
+    }
+
+    // MARK: - Helpers
+
+    private func fuzzyFind(name: String, in directory: String) -> URL? {
+        let lower = name.lowercased()
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: directory) else { return nil }
+        // Prefer entries that start with the name, then fall back to contains.
+        let candidates = entries.filter { $0.hasSuffix(".app") }
+        let startsWith = candidates.first { $0.lowercased().hasPrefix(lower) }
+        let contains   = candidates.first { $0.lowercased().contains(lower) }
+        guard let match = startsWith ?? contains else { return nil }
+        return URL(fileURLWithPath: "\(directory)/\(match)")
+    }
+
+    private func open(_ url: URL, displayName: String) async -> ToolResult {
         let ok = await withCheckedContinuation { continuation in
-            NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            NSWorkspace.shared.openApplication(
+                at: url,
+                configuration: NSWorkspace.OpenConfiguration()
+            ) { _, error in
                 continuation.resume(returning: error == nil)
             }
         }
         return ToolResult(
             toolName: name,
             success: ok,
-            message: ok ? "Opened \(appName)." : "Could not open \(appName).",
-            payload: ["launchedApp": appName]
+            message: ok ? "Opened \(displayName)." : "Could not open \(displayName).",
+            payload: ["launchedApp": displayName]
         )
     }
 }
