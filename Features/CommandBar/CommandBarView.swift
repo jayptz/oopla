@@ -7,10 +7,11 @@ struct CommandBarView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
+            // Spotlight-style pill input
             HStack(spacing: 10) {
                 Image(systemName: "sparkles")
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(.secondary)
                     .font(.title3)
                 TextField("Ask Oopla to do anything on your Mac...", text: $viewModel.query)
                     .textFieldStyle(.plain)
@@ -25,8 +26,9 @@ struct CommandBarView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .background(.ultraThinMaterial, in: Capsule())
 
+            // Dropdown list directly under the pill (plus inline execution feedback)
             VStack(spacing: 0) {
                 ForEach(Array(orchestrator.searchResults.enumerated()), id: \.element.id) { index, item in
                     ResultRow(item: item, isSelected: index == viewModel.selectedIndex)
@@ -35,17 +37,30 @@ struct CommandBarView: View {
                             viewModel.selectedIndex = index
                             Task { await viewModel.executeCurrentSelection(results: orchestrator.searchResults) }
                         }
+                        .padding(.horizontal, 4)
+                }
+
+                if orchestrator.executionState.currentPlan != nil || !orchestrator.executionState.steps.isEmpty {
+                    Divider().padding(.vertical, 8)
+                    ExecutionView(state: orchestrator.executionState)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
+                }
+
+                if let error = orchestrator.latestError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
                 }
             }
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .frame(maxHeight: 250)
-
-            ExecutionView(state: orchestrator.executionState)
-                .padding(12)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .frame(maxHeight: 260)
+            .clipShape(RoundedRectangle(cornerRadius: 16))
         }
-        .padding(22)
-        .frame(maxWidth: 820)
+        .frame(width: 560)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             viewModel.bind(orchestrator: orchestrator)
             viewModel.onQueryChanged()
@@ -64,14 +79,6 @@ struct CommandBarView: View {
         .onMoveCommand(perform: moveSelection)
         .onExitCommand {
             appState.isCommandBarVisible = false
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let error = orchestrator.latestError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(.top, 8)
-            }
         }
     }
 
