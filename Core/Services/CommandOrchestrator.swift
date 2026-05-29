@@ -27,13 +27,28 @@ final class CommandOrchestrator: ObservableObject {
 
     func planAndRun(query: String) async {
         latestError = nil
+
         do {
-            let plan = try await planner.createPlan(for: query, candidates: searchResults)
+            let plan: ActionPlan
+
+            if shouldEscalateToClaude(query: query, candidates: searchResults) {
+                executionState.statusLine = "AI planning..."
+                logger.log("Escalating to Claude — query: \"\(query)\"")
+                plan = try await planner.createPlan(for: query, candidates: searchResults)
+                logger.log("Claude returned plan with \(plan.steps.count) step(s)")
+            } else {
+                // Safe to unwrap: shouldEscalateToClaude returns false only
+                // when a strong local candidate exists.
+                let top = searchResults.first!
+                executionState.statusLine = "Local match — \(top.title)"
+                logger.log("Local match: \"\(top.title)\" (score \(top.score)) for query: \"\(query)\"")
+                plan = buildLocalPlan(query: query, candidate: top)
+            }
+
             let safety = safetyEvaluator.evaluate(plan: plan)
             executionState.currentPlan = plan
             executionState.steps = plan.steps.map { ExecutionStepState(id: $0.id, toolCall: $0, state: .pending) }
             executionState.statusLine = "Planned: \(plan.summary)"
-            logger.log("Plan created with \(plan.steps.count) step(s), safety=\(String(describing: safety.level.rawValue))")
 
             switch safety.level {
             case .safe:
@@ -59,6 +74,123 @@ final class CommandOrchestrator: ObservableObject {
         executionState.statusLine = "Cancelled."
     }
 
+    // MARK: - Confidence gate
+
+    /// Returns `true` when the query should be sent to Claude, `false` when
+    /// a fast local plan can be built without an API call.
+    private func shouldEscalateToClaude(query: String, candidates: [SearchResultItem]) -> Bool {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+
+        // ── Tier 2 triggers ────────────────────────────────────────────────
+
+        // Multi-step intent: "open X and go to Y", "do this then that".
+        let multiStepMarkers = [" and ", " then ", " after "]
+        if multiStepMarkers.contains(where: { q.contains($0) }) {
+            logger.log("Escalation reason: multi-step marker in \"\(q)\"")
+            return true
+        }
+
+        // Mutating / creative intent.
+        let mutatingWords = [
+            "create", "make", "new folder", "move", "rename", "delete",
+            "remove", "copy", "zip", "email", "send", "draft",
+            "calendar", "event", "note", "reminder", "schedule"
+        ]
+        if mutatingWords.contains(where: { q.contains($0) }) {
+            logger.log("Escalation reason: mutating keyword in \"\(q)\"")
+            return true
+        }
+
+        // Web / browser intent.
+        let webWords = [
+            "search", "google", "browser", "http", "www.",
+            ".com", ".org", ".io", "youtube", "gmail", "github"
+        ]
+        if webWords.contains(where: { q.contains($0) }) {
+            logger.log("Escalation reason: web keyword in \"\(q)\"")
+            return true
+        }
+
+        // ── Tier 1 check ───────────────────────────────────────────────────
+
+        guard let top = candidates.first else {
+            logger.log("Escalation reason: no local candidates")
+            return true
+        }
+
+        // Strip launcher prefixes so "open spotify" reduces to "spotify"
+        // before we compare it to the candidate title.
+        let launcherPrefixes = ["open ", "launch ", "start ", "show ", "run "]
+        var normalized = q
+        for prefix in launcherPrefixes {
+            if normalized.hasPrefix(prefix) {
+                normalized = String(normalized.dropFirst(prefix.count))
+                break
+            }
+        }
+
+        // App candidate: accept if the normalized term closely matches the title.
+        if top.kind == .app {
+            let title = top.title.lowercased()
+            let isMatch = title == normalized
+                || title.hasPrefix(normalized)
+                || normalized.hasPrefix(title)
+                || title.contains(normalized)
+            if isMatch { return false }
+            logger.log("Escalation reason: app candidate '\(top.title)' didn't match normalized '\(normalized)'")
+            return true
+        }
+
+        // File / folder candidate: require strong score from local search.
+        if top.kind == .file || top.kind == .folder {
+            if top.score >= 0.8 { return false }
+            logger.log("Escalation reason: file score \(top.score) below threshold")
+            return true
+        }
+
+        // Any other result kind (aiAction, web, action) → always escalate.
+        return true
+    }
+
+    // MARK: - Local plan builder
+
+    /// Constructs a single-step ActionPlan from a high-confidence local
+    /// candidate without calling the planner.
+    private func buildLocalPlan(query: String, candidate: SearchResultItem) -> ActionPlan {
+        let step: ToolCall
+
+        switch candidate.kind {
+        case .app:
+            step = ToolCall(
+                toolName: "app_launcher_tool",
+                arguments: ["appName": candidate.title],
+                reason: "High-confidence local match for '\(candidate.title)'"
+            )
+        case .file, .folder:
+            step = ToolCall(
+                toolName: "file_open_tool",
+                arguments: ["path": candidate.path ?? ""],
+                reason: "High-confidence local match for '\(candidate.title)'"
+            )
+        default:
+            // Shouldn't reach here given the gate logic, but handle gracefully.
+            step = ToolCall(
+                toolName: "file_open_tool",
+                arguments: ["path": candidate.path ?? ""],
+                reason: "Local fallback"
+            )
+        }
+
+        return ActionPlan(
+            userQuery: query,
+            summary: "Open \(candidate.title).",
+            steps: [step],
+            requiresConfirmation: false
+        )
+    }
+
+    // MARK: - Execution engine
+
     private func execute(plan: ActionPlan) async {
         executionState.statusLine = "Executing \(plan.steps.count) step(s)..."
         var runtimeContext: [String: String] = [:]
@@ -76,7 +208,8 @@ final class CommandOrchestrator: ObservableObject {
             }
 
             var args = step.toolCall.arguments
-            // Allow chained calls: if a path is missing, try prior step output.
+            // Chain context: if a downstream step needs a path, use the output
+            // of the previous file_search_tool step automatically.
             if args["path"]?.isEmpty ?? true, let bestPath = runtimeContext["bestPath"] {
                 args["path"] = bestPath
             }
