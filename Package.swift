@@ -3,8 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "Oopla",
+    // macOS 26 (Tahoe) required for Liquid Glass APIs (GlassEffectContainer,
+    // .glassEffect(), .glassEffectID()). Build requires Xcode 26.
     platforms: [
-        .macOS(.v13)
+        .macOS("26.0")
     ],
     products: [
         .executable(name: "Oopla", targets: ["Oopla"])

@@ -10,14 +10,21 @@ final class CommandOrchestrator: ObservableObject {
 
     private let searchService: SearchProviding
     private let planner: PlannerProviding
+    private let visionPlanner: PlannerProviding?
     private let registry: ToolRegistry
     private let safetyEvaluator: SafetyEvaluator
     private let logger = Logger(subsystem: "com.oopla.app", category: "orchestrator")
 
-    init(searchService: SearchProviding, planner: PlannerProviding, registry: ToolRegistry) {
-        self.searchService = searchService
-        self.planner = planner
-        self.registry = registry
+    init(
+        searchService: SearchProviding,
+        planner: PlannerProviding,
+        visionPlanner: PlannerProviding? = nil,
+        registry: ToolRegistry
+    ) {
+        self.searchService  = searchService
+        self.planner        = planner
+        self.visionPlanner  = visionPlanner
+        self.registry       = registry
         self.safetyEvaluator = SafetyEvaluator(registry: registry)
     }
 
@@ -32,9 +39,15 @@ final class CommandOrchestrator: ObservableObject {
             let plan: ActionPlan
 
             if shouldEscalateToClaude(query: query, candidates: searchResults) {
-                executionState.statusLine = "AI planning..."
-                logger.log("Escalating to Claude — query: \"\(query)\"")
-                plan = try await planner.createPlan(for: query, candidates: searchResults)
+                if requiresVision(query: query), let vp = visionPlanner {
+                    executionState.statusLine = "Analyzing screen..."
+                    logger.log("Vision mode — query: \"\(query)\"")
+                    plan = try await vp.createPlan(for: query, candidates: searchResults)
+                } else {
+                    executionState.statusLine = "AI planning..."
+                    logger.log("Escalating to Claude — query: \"\(query)\"")
+                    plan = try await planner.createPlan(for: query, candidates: searchResults)
+                }
                 logger.log("Claude returned plan with \(plan.steps.count) step(s)")
             } else {
                 // Safe to unwrap: shouldEscalateToClaude returns false only
@@ -72,6 +85,20 @@ final class CommandOrchestrator: ObservableObject {
     func cancelPendingPlan() {
         pendingConfirmation = nil
         executionState.statusLine = "Cancelled."
+    }
+
+    // MARK: - Vision gate
+
+    /// Returns `true` when the query implies the user wants Claude to look at
+    /// the current screen contents before planning.
+    private func requiresVision(query: String) -> Bool {
+        let q = query.lowercased()
+        let triggers = [
+            "screen", "look at", "read this", "what's on",
+            "current page", "this email", "this job", "see my screen",
+            "what i'm looking at", "on my screen", "from the screen"
+        ]
+        return triggers.contains { q.contains($0) }
     }
 
     // MARK: - Confidence gate
