@@ -34,7 +34,11 @@ final class VisionPlanner: PlannerProviding {
 
     // MARK: - PlannerProviding
 
-    func createPlan(for query: String, candidates: [SearchResultItem]) async throws -> ActionPlan {
+    func createPlan(
+        for query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?
+    ) async throws -> ActionPlan {
         // Attempt screen capture. On failure, fall back to text-only planning
         // so the user still gets an answer even without Screen Recording permission.
         let base64: String?
@@ -45,15 +49,52 @@ final class VisionPlanner: PlannerProviding {
             base64 = nil
         }
 
-        let prompt = buildPrompt(query: query, candidates: candidates)
+        let hasAttached = attachedFileContext != nil && !(attachedFileContext?.isEmpty ?? true)
+        // Pre-load resume only when tailoring and user did not drop a file.
+        let resumeText: String?
+        if hasAttached {
+            resumeText = nil
+        } else if isResumeTailoringQuery(query) {
+            resumeText = await loadPrimaryResumeText()
+        } else {
+            resumeText = nil
+        }
+
+        let prompt = buildPrompt(
+            query: query,
+            candidates: candidates,
+            resumeText: resumeText,
+            attachedFileContext: attachedFileContext
+        )
 
         if let b64 = base64 {
             let json = try await callClaudeWithVision(prompt: prompt, base64JPEG: b64)
             return try parsePlan(json: json, query: query)
         } else {
             // No screenshot available — delegate to the text-only planner.
-            return try await fallback.createPlan(for: query, candidates: candidates)
+            return try await fallback.createPlan(
+                for: query,
+                candidates: candidates,
+                attachedFileContext: attachedFileContext
+            )
         }
+    }
+
+    // MARK: - Resume tailoring preflight
+
+    private func isResumeTailoringQuery(_ query: String) -> Bool {
+        let q = query.lowercased()
+        let tailoring = ["tailor", "customize", "customise", "adapt", "adjust", "rewrite"]
+        let resumeWords = ["resume", "cv", "curriculum vitae"]
+        return tailoring.contains(where: { q.contains($0) })
+            && resumeWords.contains(where: { q.contains($0) })
+    }
+
+    private func loadPrimaryResumeText() async -> String? {
+        let findResult = try? await ResumeFindTool().execute(arguments: [:])
+        guard let path = findResult?.payload["resume1Path"], !path.isEmpty else { return nil }
+        let readResult = try? await FileReadTool().execute(arguments: ["path": path])
+        return readResult?.payload["content"]
     }
 
     // MARK: - Image encoding
@@ -125,7 +166,7 @@ final class VisionPlanner: PlannerProviding {
 
         let body: [String: Any] = [
             "model":      model,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "messages": [
                 ["role": "user", "content": [imageBlock, textBlock]]
             ]
@@ -152,7 +193,12 @@ final class VisionPlanner: PlannerProviding {
 
     // MARK: - Prompt (identical to ClaudePlanner, with a vision note prepended)
 
-    private func buildPrompt(query: String, candidates: [SearchResultItem]) -> String {
+    private func buildPrompt(
+        query: String,
+        candidates: [SearchResultItem],
+        resumeText: String?,
+        attachedFileContext: String?
+    ) -> String {
         let candidateList = candidates.prefix(8).map { item in
             "- [\(item.kind.rawValue)] \(item.title)\(item.path.map { " (path: \($0))" } ?? "")"
         }.joined(separator: "\n")
@@ -168,9 +214,28 @@ final class VisionPlanner: PlannerProviding {
         clipboard_read_tool      | args: (none)
         finder_reveal_tool       | args: path (string)
         mail_send_tool           | args: to, subject, body, attachmentPath (optional) [confirmationRequired]
-        pdf_create_tool          | args: content, filename, savePath
+        pdf_create_tool          | args: content, filename, savePath (optional — defaults to ~/Desktop) [confirmationRequired]
         file_attach_tool         | args: path, destination
+        file_read_tool           | args: path (string)
+        resume_find_tool         | args: (none)
+        youtube_search_tool      | args: query (string), count (string, optional, default "3")
         """
+
+        let attachedSection = attachedFileContext.map { "\n\($0)\n" } ?? ""
+        let hasAttachedFiles = attachedFileContext != nil && !(attachedFileContext?.isEmpty ?? true)
+
+        let resumeSection: String
+        if let resumeText, !resumeText.isEmpty {
+            resumeSection = """
+
+            USER'S EXISTING RESUME (use ONLY this factual content — do not invent experience):
+            ---
+            \(resumeText)
+            ---
+            """
+        } else {
+            resumeSection = ""
+        }
 
         return """
         You are Oopla, an AI command bar for macOS. Your job is to convert a user's natural language command into a structured action plan.
@@ -178,6 +243,7 @@ final class VisionPlanner: PlannerProviding {
         IMPORTANT: A screenshot of the user's current screen is attached to this message as an image. \
         Use what you see on screen to inform your plan — for example, if the user says "this email" or \
         "this job posting", identify the relevant content from the screenshot and incorporate it into your tool arguments.
+        \(attachedSection)\(resumeSection)
 
         Available tools:
         \(tools)
@@ -187,8 +253,31 @@ final class VisionPlanner: PlannerProviding {
         Pass the app's common display name exactly as the user would say it. The tool resolves name variants automatically.
         - browser_open_url_tool opens a URL in the default browser. Use it for web destinations rather than launching a browser separately.
         - mail_send_tool composes an email using the system mailto: scheme; use it when the user wants to send or draft an email.
-        - pdf_create_tool creates a PDF from plain-text or markdown content; savePath should be a directory path.
+        - pdf_create_tool creates a professional PDF from markdown/plain text; savePath is a directory (default ~/Desktop).
         - file_attach_tool copies a file to a destination for email attachments or sharing.
+        - file_read_tool extracts text from .txt, .md, .pdf, or .docx files at the given path.
+        - resume_find_tool locates the user's resume files on their Mac (newest first). \
+        Skip this if the user already attached their resume below.
+        - youtube_search_tool opens YouTube search results in the browser for a focused topic query.
+
+        Screen study / explain — if the user asks you to explain what's on their screen, study help, or understand content:
+        1. Look carefully at the screenshot — read any notes, code, diagrams, slides, or text visible.
+        2. Write a clear, concise explanation in the "explanation" field of your JSON response (2-4 short paragraphs, plain language, like a good tutor).
+        3. If they also ask for videos or resources, add a youtube_search_tool step with a focused search query based on the main topic \
+        (e.g. if the screen shows binary search tree notes, search "binary search tree explained").
+        4. The explanation field is shown as text to the user; the tool steps are executed. Use an empty steps array if only explaining.
+
+        Resume tailoring — if the user asks to tailor, adapt, or customize their resume for a job:
+        1. Read the job posting visible on screen from the screenshot.
+        \(hasAttachedFiles
+            ? "2. The user dropped their resume — use ONLY the attached file content above. Do NOT use resume_find_tool or file_read_tool for the resume."
+            : "2. Plan resume_find_tool, then file_read_tool with path resume1Path (or use the resume text above if already provided).")
+        3. Write a tailored resume using ONLY real experience and skills from their actual resume — reorder and rephrase, but NEVER fabricate jobs, employers, skills, or qualifications.
+        4. Put the full tailored resume markdown in pdf_create_tool's content argument.
+        5. Name the file like Resume_[CompanyName].pdf (derive company from the job posting).
+        6. Set savePath to ~/Desktop unless the user specifies otherwise.
+        Plan these steps in sequence. Put the job posting details (company, role, key requirements) in the plan summary so later steps can reference them.
+        Set requiresConfirmation to true for resume tailoring plans.
 
         Local search candidates already found:
         \(candidateList.isEmpty ? "(none)" : candidateList)
@@ -196,17 +285,20 @@ final class VisionPlanner: PlannerProviding {
         User command: "\(query)"
 
         Rules:
+        - Use attached file content when the user dropped files — it is already provided above.
         - Reference screen content when the user says "this", "current", "what's on screen", etc.
         - Use local candidates when relevant.
         - For multi-step commands produce multiple steps in order.
-        - Set requiresConfirmation to true if any step creates, moves, or modifies files/sends email.
-        - Keep summary short (one sentence).
+        - Set requiresConfirmation to true if any step creates files, moves files, or sends email.
+        - NEVER invent resume content — only use facts from the user's real resume.
+        - Keep summary short but include job posting context for resume flows.
         - Only use tools from the list above.
         - All argument values must be strings.
 
-        Respond ONLY with a valid JSON object in this exact format, no markdown, no explanation:
+        Respond ONLY with a valid JSON object in this exact format (no markdown fences):
         {
           "summary": "short description of what you will do",
+          "explanation": "your detailed explanation here, or null if not an explain request",
           "requiresConfirmation": false,
           "steps": [
             {
@@ -238,7 +330,8 @@ final class VisionPlanner: PlannerProviding {
             userQuery: query,
             summary: plan.summary,
             steps: steps,
-            requiresConfirmation: plan.requiresConfirmation
+            requiresConfirmation: plan.requiresConfirmation,
+            explanation: plan.explanation
         )
     }
 }
@@ -260,5 +353,8 @@ private struct PlannedAction: Decodable {
     let toolName: String; let arguments: [String: String]; let reason: String
 }
 private struct ClaudePlan: Decodable {
-    let summary: String; let requiresConfirmation: Bool; let steps: [PlannedAction]
+    let summary: String
+    let explanation: String?
+    let requiresConfirmation: Bool
+    let steps: [PlannedAction]
 }

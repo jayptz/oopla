@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - CommandBarView
 
@@ -9,31 +10,78 @@ struct CommandBarView: View {
     @StateObject private var viewModel = CommandBarViewModel()
     @FocusState private var focused: Bool
     @Namespace private var glassNamespace
+    @State private var isDragTarget = false
+
+    private static let dropTypes: [UTType] = [
+        .fileURL,
+        .pdf,
+        .plainText,
+        UTType(filenameExtension: "docx")!
+    ]
 
     var body: some View {
         GlassEffectContainer {
             VStack(spacing: 8) {
 
-                // ── Search input ────────────────────────────────────────
-                HStack(spacing: 12) {
-                    Image(systemName: "sparkles")
-                        .font(.title3)
-                        .foregroundStyle(.primary)
-
-                    TextField("Ask Oopla to do anything on your Mac...", text: $viewModel.query)
-                        .textFieldStyle(.plain)
-                        .font(.title3)
-                        .focused($focused)
-                        .onChange(of: viewModel.query) { _ in
-                            viewModel.onQueryChanged()
+                // ── Dropped file chips ──────────────────────────────────
+                if !viewModel.droppedFiles.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(viewModel.droppedFiles, id: \.self) { url in
+                                DroppedFileChip(url: url) {
+                                    viewModel.removeDroppedFile(url)
+                                }
+                            }
                         }
-                        .onSubmit {
-                            Task { await viewModel.executeCurrentSelection(results: orchestrator.searchResults) }
-                        }
+                        .padding(.horizontal, 4)
+                    }
                 }
-                .frame(height: 52)
-                .padding(.horizontal, 16)
-                .glassEffect(in: RoundedRectangle(cornerRadius: 14))
+
+                // ── Search input ────────────────────────────────────────
+                ZStack {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.title3)
+                            .foregroundStyle(.primary)
+
+                        TextField("Ask Oopla to do anything on your Mac...", text: $viewModel.query)
+                            .textFieldStyle(.plain)
+                            .font(.title3)
+                            .focused($focused)
+                            .onChange(of: viewModel.query) { _ in
+                                viewModel.onQueryChanged()
+                            }
+                            .onSubmit {
+                                Task {
+                                    await viewModel.executeCurrentSelection(results: orchestrator.searchResults)
+                                }
+                            }
+                    }
+                    .frame(height: 52)
+                    .padding(.horizontal, 16)
+                    .glassEffect(in: RoundedRectangle(cornerRadius: 14))
+
+                    if isDragTarget {
+                        RoundedRectangle(cornerRadius: 14)
+                            .strokeBorder(Color.cyan.opacity(0.85), lineWidth: 2)
+                            .background(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .fill(Color.cyan.opacity(0.12))
+                            )
+                            .shadow(color: .cyan.opacity(0.35), radius: 8)
+
+                        VStack(spacing: 4) {
+                            Image(systemName: "arrow.down.doc.fill")
+                                .font(.title3)
+                                .foregroundStyle(.cyan)
+                            Text("Drop file here")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.cyan)
+                        }
+                        .allowsHitTesting(false)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.18), value: isDragTarget)
 
                 // ── Results list ────────────────────────────────────────
                 if !orchestrator.searchResults.isEmpty {
@@ -64,6 +112,7 @@ struct CommandBarView: View {
                 // ── Execution feedback ──────────────────────────────────
                 if orchestrator.executionState.currentPlan != nil
                     || !orchestrator.executionState.steps.isEmpty
+                    || orchestrator.executionState.explanation != nil
                 {
                     Divider().padding(.horizontal, 8)
 
@@ -83,6 +132,9 @@ struct CommandBarView: View {
             }
             .padding(12)
             .glassEffect(in: RoundedRectangle(cornerRadius: 20))
+            .onDrop(of: Self.dropTypes, isTargeted: $isDragTarget) { providers in
+                viewModel.handleDrop(providers: providers)
+            }
         }
         .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
@@ -120,6 +172,35 @@ struct CommandBarView: View {
         default:
             break
         }
+    }
+}
+
+// MARK: - DroppedFileChip
+
+private struct DroppedFileChip: View {
+    let url: URL
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                .resizable()
+                .frame(width: 18, height: 18)
+
+            Text(url.lastPathComponent)
+                .font(.caption.weight(.medium))
+                .lineLimit(1)
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .glassEffect(in: Capsule())
     }
 }
 

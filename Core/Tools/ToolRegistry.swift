@@ -38,8 +38,44 @@ final class ToolRegistry {
                 SystemDNDTool(),
                 MailSendTool(),
                 PDFCreateTool(),
-                FileAttachTool()
+                FileAttachTool(),
+                FileReadTool(),
+                ResumeFindTool(),
+                YouTubeSearchTool()
             ]
+        )
+    }
+}
+
+// MARK: - YouTube search
+
+struct YouTubeSearchTool: ToolProtocol {
+    let name = "youtube_search_tool"
+    let description = "Opens YouTube search results for a query in the default browser."
+    let inputSchema = [
+        "query": "String — search terms",
+        "count": "String — optional, ignored for MVP (opens search results page)"
+    ]
+    let resultSchema = ["openedURL": "String"]
+    let safetyLevel: SafetyLevel = .safe
+
+    func execute(arguments: [String: String]) async throws -> ToolResult {
+        guard let query = arguments["query"], !query.isEmpty else {
+            return ToolResult(toolName: name, success: false, message: "Missing query.", payload: [:])
+        }
+
+        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let urlString = "https://www.youtube.com/results?search_query=\(encoded)"
+        guard let url = URL(string: urlString) else {
+            return ToolResult(toolName: name, success: false, message: "Invalid search URL.", payload: [:])
+        }
+
+        let ok = NSWorkspace.shared.open(url)
+        return ToolResult(
+            toolName: name,
+            success: ok,
+            message: ok ? "Opened YouTube search." : "Could not open YouTube.",
+            payload: ["openedURL": urlString]
         )
     }
 }
@@ -414,65 +450,75 @@ struct MailSendTool: ToolProtocol {
 
 struct PDFCreateTool: ToolProtocol {
     let name = "pdf_create_tool"
-    let description = "Creates a PDF from plain-text or markdown content and saves it to savePath."
+    let description = "Creates a professional PDF from markdown or plain text and saves it to disk."
     let inputSchema = [
-        "content":  "String — text content to render",
-        "filename": "String — output filename (without .pdf extension is fine)",
-        "savePath": "String — directory path where the PDF should be saved"
+        "content":  "String — markdown or plain text body",
+        "filename": "String — output filename (e.g. Resume_Acme.pdf)",
+        "savePath": "String — optional directory; defaults to ~/Desktop"
     ]
     let resultSchema  = ["savedPath": "String"]
-    let safetyLevel: SafetyLevel = .safe
+    let safetyLevel: SafetyLevel = .confirmationRequired
+
+    private static let margin: CGFloat = 50
+    private static let pageWidth: CGFloat = 612
+    private static let pageHeight: CGFloat = 792
 
     func execute(arguments: [String: String]) async throws -> ToolResult {
-        guard let content  = arguments["content"],
-              let filename = arguments["filename"],
-              let savePath = arguments["savePath"] else {
-            return ToolResult(toolName: name, success: false, message: "Missing required arguments.", payload: [:])
+        guard let content  = arguments["content"], !content.isEmpty,
+              let filename = arguments["filename"], !filename.isEmpty else {
+            return ToolResult(toolName: name, success: false, message: "Missing content or filename.", payload: [:])
         }
+
+        let savePath = arguments["savePath"]?.isEmpty == false
+            ? arguments["savePath"]!
+            : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop").path
 
         let baseName = filename.hasSuffix(".pdf") ? filename : "\(filename).pdf"
         let dirURL   = URL(fileURLWithPath: savePath, isDirectory: true)
-        let fileURL  = dirURL.appendingPathComponent(baseName)
 
-        guard let pdfData = renderTextAsPDF(content) else {
+        do {
+            try FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        } catch {
+            return ToolResult(toolName: name, success: false, message: "Could not create directory: \(error.localizedDescription)", payload: [:])
+        }
+
+        let fileURL = dirURL.appendingPathComponent(baseName)
+
+        guard let pdfData = renderMarkdownAsPDF(content) else {
             return ToolResult(toolName: name, success: false, message: "Failed to render PDF.", payload: [:])
         }
 
         do {
             try pdfData.write(to: fileURL)
-            return ToolResult(toolName: name, success: true, message: "PDF saved.", payload: ["savedPath": fileURL.path])
+            return ToolResult(toolName: name, success: true, message: "PDF saved to \(fileURL.path).", payload: ["savedPath": fileURL.path])
         } catch {
             return ToolResult(toolName: name, success: false, message: "Write error: \(error.localizedDescription)", payload: [:])
         }
     }
 
-    // MARK: CoreText-based PDF renderer (no UIKit / NSTextView required)
+    // MARK: - Markdown → attributed string → PDF
 
-    private func renderTextAsPDF(_ text: String) -> Data? {
-        let pageWidth:  CGFloat = 612
-        let pageHeight: CGFloat = 792
-        let margin:     CGFloat = 72
-        let contentW = pageWidth - 2 * margin
-
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font:            NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.black
-        ]
-        let attrStr      = NSAttributedString(string: text, attributes: attrs)
-        let framesetter  = CTFramesetterCreateWithAttributedString(attrStr)
+    private func renderMarkdownAsPDF(_ markdown: String) -> Data? {
+        let attrStr = parseMarkdown(markdown)
+        let framesetter = CTFramesetterCreateWithAttributedString(attrStr)
+        let contentW = Self.pageWidth - 2 * Self.margin
 
         let mutableData = NSMutableData()
-        var mediaBox    = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+        var mediaBox = CGRect(x: 0, y: 0, width: Self.pageWidth, height: Self.pageHeight)
         guard let consumer = CGDataConsumer(data: mutableData as CFMutableData),
               let context  = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return nil }
 
         var charIndex = 0
-        let totalChars = attrStr.length
+        let total = attrStr.length
 
         repeat {
             context.beginPDFPage(nil)
-
-            let contentRect = CGRect(x: margin, y: margin, width: contentW, height: pageHeight - 2 * margin)
+            let contentRect = CGRect(
+                x: Self.margin,
+                y: Self.margin,
+                width: contentW,
+                height: Self.pageHeight - 2 * Self.margin
+            )
             let path = CGMutablePath()
             path.addRect(contentRect)
 
@@ -483,9 +529,8 @@ struct PDFCreateTool: ToolProtocol {
                 nil
             )
 
-            // CoreText draws with origin at bottom-left; flip the context.
             context.saveGState()
-            context.translateBy(x: 0, y: pageHeight)
+            context.translateBy(x: 0, y: Self.pageHeight)
             context.scaleBy(x: 1, y: -1)
             CTFrameDraw(frame, context)
             context.restoreGState()
@@ -493,12 +538,70 @@ struct PDFCreateTool: ToolProtocol {
             let visible = CTFrameGetVisibleStringRange(frame)
             if visible.length == 0 { break }
             charIndex += visible.length
-
             context.endPDFPage()
-        } while charIndex < totalChars
+        } while charIndex < total
 
         context.closePDF()
         return mutableData as Data
+    }
+
+    private func parseMarkdown(_ text: String) -> NSAttributedString {
+        let bodyFont   = NSFont(name: "Helvetica", size: 11) ?? NSFont.systemFont(ofSize: 11)
+        let headerFont = NSFont(name: "Helvetica-Bold", size: 16) ?? NSFont.boldSystemFont(ofSize: 16)
+        let boldFont   = NSFont(name: "Helvetica-Bold", size: 11) ?? NSFont.boldSystemFont(ofSize: 11)
+        let result     = NSMutableAttributedString()
+
+        let lines = text.components(separatedBy: .newlines)
+        for line in lines {
+            var trimmed = line.trimmingCharacters(in: .whitespaces)
+            var font = bodyFont
+            var extraSpacing: CGFloat = 4
+
+            if trimmed.hasPrefix("# ") {
+                trimmed = String(trimmed.dropFirst(2))
+                font = headerFont
+                extraSpacing = 10
+            } else if trimmed.hasPrefix("## ") {
+                trimmed = String(trimmed.dropFirst(3))
+                font = NSFont(name: "Helvetica-Bold", size: 13) ?? NSFont.boldSystemFont(ofSize: 13)
+                extraSpacing = 8
+            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
+                trimmed = "• " + String(trimmed.dropFirst(2))
+            }
+
+            let lineAttr = NSMutableAttributedString(
+                string: trimmed + "\n",
+                attributes: [
+                    .font: font,
+                    .foregroundColor: NSColor.black,
+                    .paragraphStyle: {
+                        let p = NSMutableParagraphStyle()
+                        p.paragraphSpacing = extraSpacing
+                        return p
+                    }()
+                ]
+            )
+
+            // Inline **bold**
+            applyBold(in: lineAttr, boldFont: boldFont, bodyFont: bodyFont)
+            result.append(lineAttr)
+        }
+        return result
+    }
+
+    private func applyBold(in attr: NSMutableAttributedString, boldFont: NSFont, bodyFont: NSFont) {
+        let full = attr.string as NSString
+        let pattern = "\\*\\*(.+?)\\*\\*"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+        let matches = regex.matches(in: attr.string, range: NSRange(location: 0, length: full.length))
+        // Process in reverse so ranges stay valid.
+        for match in matches.reversed() {
+            guard match.numberOfRanges >= 2 else { continue }
+            let boldRange = match.range(at: 1)
+            let boldText  = full.substring(with: boldRange)
+            attr.replaceCharacters(in: match.range, with: boldText)
+            attr.addAttribute(.font, value: boldFont, range: NSRange(location: match.range.location, length: boldText.count))
+        }
     }
 }
 

@@ -63,19 +63,23 @@ struct ActionPlan: Identifiable, Codable, Hashable {
     let summary: String
     let steps: [ToolCall]
     let requiresConfirmation: Bool
+    /// Human-readable text shown in the UI (e.g. screen explanations), separate from tool steps.
+    let explanation: String?
 
     init(
         id: UUID = UUID(),
         userQuery: String,
         summary: String,
         steps: [ToolCall],
-        requiresConfirmation: Bool = false
+        requiresConfirmation: Bool = false,
+        explanation: String? = nil
     ) {
         self.id = id
         self.userQuery = userQuery
         self.summary = summary
         self.steps = steps
         self.requiresConfirmation = requiresConfirmation
+        self.explanation = explanation
     }
 }
 
@@ -103,4 +107,6 @@ struct CommandExecutionState: Hashable {
     var currentPlan: ActionPlan?
     var steps: [ExecutionStepState] = []
     var statusLine: String = "Ready"
+    /// Explanation text from the current plan, surfaced in the command bar UI.
+    var explanation: String?
 }
