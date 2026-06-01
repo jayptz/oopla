@@ -60,10 +60,16 @@ final class ClaudePlanner: PlannerProviding {
         clipboard_write_tool     | args: text (string)
         clipboard_read_tool      | args: (none)
         finder_reveal_tool       | args: path (string)
+        mail_send_tool           | args: to, subject, body, attachmentPath (optional) [confirmationRequired]
+        pdf_create_tool          | args: content, filename, savePath
+        file_attach_tool         | args: path, destination
         """
 
         return """
         You are Oopla, an AI command bar for macOS. Your job is to convert a user's natural language command into a structured action plan.
+
+        Note: a screenshot of the user's current screen may be attached to some requests as an image. \
+        When present, use what you see on screen to fill in arguments (e.g. names, subjects, content).
 
         Available tools:
         \(tools)
@@ -79,6 +85,9 @@ final class ClaudePlanner: PlannerProviding {
         the user specifically names a browser.
         - For "open <app> and go to <url>" commands, use app_launcher_tool first then \
         browser_open_url_tool for the URL.
+        - mail_send_tool composes an email using the system mailto: scheme; confirmation always required.
+        - pdf_create_tool writes a PDF to disk from plain-text or markdown content; savePath is a directory.
+        - file_attach_tool copies a file to a destination folder for sharing or email attachment.
 
         Local search candidates already found:
         \(candidateList.isEmpty ? "(none)" : candidateList)

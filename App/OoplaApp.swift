@@ -13,12 +13,15 @@ struct OoplaApp: App {
     private let statusBar = StatusBarController()
 
     init() {
-        let registry = ToolRegistry.makeDefault()
+        let registry    = ToolRegistry.makeDefault()
+        let apiKey      = EnvLoader.get("ANTHROPIC_API_KEY") ?? ""
+        let capture     = ScreenCaptureService()
         _orchestrator = StateObject(
             wrappedValue: CommandOrchestrator(
                 searchService: LocalSearchIndex(),
-                planner: ClaudePlanner(apiKey: EnvLoader.get("ANTHROPIC_API_KEY") ?? ""),
-                registry: registry
+                planner:       ClaudePlanner(apiKey: apiKey),
+                visionPlanner: VisionPlanner(apiKey: apiKey, captureService: capture),
+                registry:      registry
             )
         )
     }

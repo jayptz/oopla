@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import PDFKit
 
 final class ToolRegistry {
     private var tools: [String: ToolProtocol] = [:]
@@ -34,7 +35,10 @@ final class ToolRegistry {
                 EmailDraftTool(),
                 FolderCreateTool(),
                 FinderRevealTool(),
-                SystemDNDTool()
+                SystemDNDTool(),
+                MailSendTool(),
+                PDFCreateTool(),
+                FileAttachTool()
             ]
         )
     }
@@ -360,5 +364,174 @@ struct SystemDNDTool: ToolProtocol {
     let safetyLevel: SafetyLevel = .confirmationRequired
     func execute(arguments: [String : String]) async throws -> ToolResult {
         ToolResult(toolName: name, success: true, message: "DND integration is mocked in MVP.", payload: ["enabled": arguments["enabled"] ?? "true"])
+    }
+}
+
+// MARK: - Mail / Document / Attachment tools
+
+struct MailSendTool: ToolProtocol {
+    let name = "mail_send_tool"
+    let description = "Composes an email in the default mail app via mailto: URL scheme."
+    let inputSchema = [
+        "to":             "String — recipient address",
+        "subject":        "String — email subject",
+        "body":           "String — email body",
+        "attachmentPath": "String — optional local file path to attach"
+    ]
+    let resultSchema  = ["opened": "Bool"]
+    let safetyLevel: SafetyLevel = .confirmationRequired
+
+    func execute(arguments: [String: String]) async throws -> ToolResult {
+        var components      = URLComponents()
+        components.scheme   = "mailto"
+        components.path     = arguments["to"] ?? ""
+        var items: [URLQueryItem] = []
+        if let subject = arguments["subject"], !subject.isEmpty {
+            items.append(URLQueryItem(name: "subject", value: subject))
+        }
+        if let body = arguments["body"], !body.isEmpty {
+            items.append(URLQueryItem(name: "body", value: body))
+        }
+        // Note: standard mailto: does not support attachments; attachment path
+        // is stored in the payload so a future native Mail integration can use it.
+        components.queryItems = items.isEmpty ? nil : items
+
+        guard let url = components.url else {
+            return ToolResult(toolName: name, success: false, message: "Could not build mailto URL.", payload: [:])
+        }
+        let ok = NSWorkspace.shared.open(url)
+        return ToolResult(
+            toolName: name,
+            success: ok,
+            message: ok ? "Opened Mail composer." : "Failed to open Mail.",
+            payload: [
+                "opened":         "\(ok)",
+                "attachmentPath": arguments["attachmentPath"] ?? ""
+            ]
+        )
+    }
+}
+
+struct PDFCreateTool: ToolProtocol {
+    let name = "pdf_create_tool"
+    let description = "Creates a PDF from plain-text or markdown content and saves it to savePath."
+    let inputSchema = [
+        "content":  "String — text content to render",
+        "filename": "String — output filename (without .pdf extension is fine)",
+        "savePath": "String — directory path where the PDF should be saved"
+    ]
+    let resultSchema  = ["savedPath": "String"]
+    let safetyLevel: SafetyLevel = .safe
+
+    func execute(arguments: [String: String]) async throws -> ToolResult {
+        guard let content  = arguments["content"],
+              let filename = arguments["filename"],
+              let savePath = arguments["savePath"] else {
+            return ToolResult(toolName: name, success: false, message: "Missing required arguments.", payload: [:])
+        }
+
+        let baseName = filename.hasSuffix(".pdf") ? filename : "\(filename).pdf"
+        let dirURL   = URL(fileURLWithPath: savePath, isDirectory: true)
+        let fileURL  = dirURL.appendingPathComponent(baseName)
+
+        guard let pdfData = renderTextAsPDF(content) else {
+            return ToolResult(toolName: name, success: false, message: "Failed to render PDF.", payload: [:])
+        }
+
+        do {
+            try pdfData.write(to: fileURL)
+            return ToolResult(toolName: name, success: true, message: "PDF saved.", payload: ["savedPath": fileURL.path])
+        } catch {
+            return ToolResult(toolName: name, success: false, message: "Write error: \(error.localizedDescription)", payload: [:])
+        }
+    }
+
+    // MARK: CoreText-based PDF renderer (no UIKit / NSTextView required)
+
+    private func renderTextAsPDF(_ text: String) -> Data? {
+        let pageWidth:  CGFloat = 612
+        let pageHeight: CGFloat = 792
+        let margin:     CGFloat = 72
+        let contentW = pageWidth - 2 * margin
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font:            NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.black
+        ]
+        let attrStr      = NSAttributedString(string: text, attributes: attrs)
+        let framesetter  = CTFramesetterCreateWithAttributedString(attrStr)
+
+        let mutableData = NSMutableData()
+        var mediaBox    = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+        guard let consumer = CGDataConsumer(data: mutableData as CFMutableData),
+              let context  = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return nil }
+
+        var charIndex = 0
+        let totalChars = attrStr.length
+
+        repeat {
+            context.beginPDFPage(nil)
+
+            let contentRect = CGRect(x: margin, y: margin, width: contentW, height: pageHeight - 2 * margin)
+            let path = CGMutablePath()
+            path.addRect(contentRect)
+
+            let frame = CTFramesetterCreateFrame(
+                framesetter,
+                CFRange(location: charIndex, length: 0),
+                path,
+                nil
+            )
+
+            // CoreText draws with origin at bottom-left; flip the context.
+            context.saveGState()
+            context.translateBy(x: 0, y: pageHeight)
+            context.scaleBy(x: 1, y: -1)
+            CTFrameDraw(frame, context)
+            context.restoreGState()
+
+            let visible = CTFrameGetVisibleStringRange(frame)
+            if visible.length == 0 { break }
+            charIndex += visible.length
+
+            context.endPDFPage()
+        } while charIndex < totalChars
+
+        context.closePDF()
+        return mutableData as Data
+    }
+}
+
+struct FileAttachTool: ToolProtocol {
+    let name = "file_attach_tool"
+    let description = "Copies a file to a destination folder, useful for preparing email attachments."
+    let inputSchema = [
+        "path":        "String — source file path",
+        "destination": "String — destination directory or full file path"
+    ]
+    let resultSchema  = ["copiedPath": "String"]
+    let safetyLevel: SafetyLevel = .safe
+
+    func execute(arguments: [String: String]) async throws -> ToolResult {
+        guard let path        = arguments["path"],
+              let destination = arguments["destination"] else {
+            return ToolResult(toolName: name, success: false, message: "Missing path or destination.", payload: [:])
+        }
+
+        let srcURL  = URL(fileURLWithPath: path)
+        var destURL = URL(fileURLWithPath: destination)
+
+        // If destination is a directory, keep the original filename.
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: destination, isDirectory: &isDir), isDir.boolValue {
+            destURL = destURL.appendingPathComponent(srcURL.lastPathComponent)
+        }
+
+        do {
+            try FileManager.default.copyItem(at: srcURL, to: destURL)
+            return ToolResult(toolName: name, success: true, message: "File copied.", payload: ["copiedPath": destURL.path])
+        } catch {
+            return ToolResult(toolName: name, success: false, message: "Copy failed: \(error.localizedDescription)", payload: [:])
+        }
     }
 }
