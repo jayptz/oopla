@@ -121,6 +121,22 @@ final class ClaudePlanner: PlannerProviding {
         3. The explanation is shown as text in the UI; tool steps are executed separately.
 
         Distinguish between INFORMATIONAL questions and ACTION requests:
+        INFORMATIONAL (answer in the "explanation" field, do NOT execute tools unless needed to find the answer):
+        - "where is his LinkedIn?", "what is X?", "who is this person?", "find me the link to...", "what's their email?"
+        - For these, provide the answer directly in explanation.
+        - If you genuinely need to look something up to answer, you may use web_search_tool, but then summarize the finding in explanation.
+        - If a profile URL or answer is visible/inferable from screen/context, include the actual full URL/answer in explanation.
+
+        ACTION (execute the appropriate tool):
+        - "open his LinkedIn", "go to that page", "take me to...", "launch...", "create...", "send..."
+        - These should execute browser_open_url_tool, app_launcher_tool, etc.
+
+        The difference:
+        - "where/what/who/find the link" = tell me (explanation)
+        - "open/go/take me/launch" = do it (tool step)
+        - When you provide a link in explanation, write it as a full URL.
+
+        Distinguish between INFORMATIONAL questions and ACTION requests:
         INFORMATIONAL (answer in "explanation", avoid tool execution unless truly needed):
         - "where is his LinkedIn?", "what is X?", "who is this person?", "find me the link to...", "what's their email?"
         - For these, provide the answer directly in explanation.

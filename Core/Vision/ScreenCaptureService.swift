@@ -56,9 +56,12 @@ final class ScreenCaptureService {
         )
 
         let config = SCStreamConfiguration()
-        // Native resolution; for Retina this is 2× the point size.
-        config.width  = display.width
-        config.height = display.height
+        // Request true native pixel resolution (retina-aware).
+        // Prefer CoreGraphics pixel dimensions when available.
+        let pixelWidth = Int(CGDisplayPixelsWide(display.displayID))
+        let pixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
+        config.width = pixelWidth > 0 ? pixelWidth : display.width
+        config.height = pixelHeight > 0 ? pixelHeight : display.height
         config.capturesAudio = false
 
         let cgImage: CGImage

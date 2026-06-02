@@ -18,8 +18,10 @@ final class VisionPlanner: PlannerProviding {
     private let session = URLSession.shared
     private let fallback: ClaudePlanner
 
-    /// Max compressed JPEG size sent to the API (1 MB).
-    private static let maxImageBytes = 1_048_576
+    /// Max compressed JPEG size sent to the API (4 MB).
+    private static let maxImageBytes = 4_194_304
+    /// Claude vision reads best around this long-edge size.
+    private static let targetLongEdge: CGFloat = 1568
 
     init(
         apiKey: String,
@@ -123,31 +125,34 @@ final class VisionPlanner: PlannerProviding {
 
     // MARK: - Image encoding
 
-    /// Resizes and JPEG-compresses the image until it fits within `maxImageBytes`.
+    /// Scales screenshot to Claude-friendly long edge and JPEG-compresses until within size budget.
     private func encodeImage(_ image: NSImage, maxBytes: Int = maxImageBytes) -> String? {
-        var size = image.size
-        var compressionFactor: CGFloat = 0.85
+        let sourceSize = image.size
+        let longest = max(sourceSize.width, sourceSize.height)
+        let scale = longest > Self.targetLongEdge ? (Self.targetLongEdge / longest) : 1.0
+        let size = NSSize(
+            width: max(1, sourceSize.width * scale),
+            height: max(1, sourceSize.height * scale)
+        )
 
-        while true {
-            guard let cgImage = renderCGImage(image, size: size) else { return nil }
-            let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let cgImage = renderCGImage(image, size: size) else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+
+        var compressionFactor: CGFloat = 0.9
+        while compressionFactor >= 0.5 {
             guard let data = rep.representation(
                 using: .jpeg,
                 properties: [.compressionFactor: compressionFactor]
             ) else { return nil }
 
-            if data.count <= maxBytes { return data.base64EncodedString() }
-
-            // Reduce resolution by 25 % each pass; drop quality as a last resort.
-            if size.width > 600 {
-                size = NSSize(width: size.width * 0.75, height: size.height * 0.75)
-            } else if compressionFactor > 0.3 {
-                compressionFactor -= 0.2
-            } else {
-                // Return whatever we have even if it slightly exceeds the limit.
+            if data.count <= maxBytes || compressionFactor <= 0.5 {
                 return data.base64EncodedString()
             }
+
+            compressionFactor -= 0.1
         }
+
+        return nil
     }
 
     private func renderCGImage(_ image: NSImage, size: NSSize) -> CGImage? {
@@ -296,6 +301,13 @@ final class VisionPlanner: PlannerProviding {
         3. If they also ask for videos or resources, add a youtube_search_tool step with a focused search query based on the main topic \
         (e.g. if the screen shows binary search tree notes, search "binary search tree explained").
         4. The explanation field is shown as text to the user; the tool steps are executed. Use an empty steps array if only explaining.
+
+        Accuracy rules for reading the screen:
+        - Only state text you can actually read clearly in the screenshot.
+        - NEVER guess or infer details like names, URLs, institutions, or numbers.
+        - If text is too small or blurry, explicitly say "I can't read that clearly" rather than guessing.
+        - If asked for a specific URL or exact text that is not clearly readable, say so explicitly.
+        - Do not infer a university/company/location from partial text. Report only what is literally visible.
 
         Distinguish between INFORMATIONAL questions and ACTION requests:
         INFORMATIONAL (answer in "explanation", avoid tool execution unless truly needed):
