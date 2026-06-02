@@ -120,6 +120,21 @@ final class ClaudePlanner: PlannerProviding {
         2. Use an empty steps array if no tools are needed, or add youtube_search_tool if they want videos/resources.
         3. The explanation is shown as text in the UI; tool steps are executed separately.
 
+        Distinguish between INFORMATIONAL questions and ACTION requests:
+        INFORMATIONAL (answer in "explanation", avoid tool execution unless truly needed):
+        - "where is his LinkedIn?", "what is X?", "who is this person?", "find me the link to...", "what's their email?"
+        - For these, provide the answer directly in explanation.
+        - If you genuinely need lookup to answer, you may use web_search_tool, but still summarize findings in explanation.
+        - If a URL is visible/inferable from screen/context, include the full URL directly in explanation.
+
+        ACTION (execute tools):
+        - "open his LinkedIn", "go to that page", "take me to...", "launch...", "create...", "send..."
+        - Use browser_open_url_tool, app_launcher_tool, etc.
+
+        Difference rule:
+        - "where/what/who/find the link" => tell me (explanation)
+        - "open/go/take me/launch" => do it (tool step)
+
         Resume tailoring — if the user asks to tailor, adapt, or customize their resume for a job:
         \(hasAttachedFiles
             ? "- The user dropped their resume file(s) — use ONLY that attached content. Do NOT use resume_find_tool or file_read_tool for the resume."

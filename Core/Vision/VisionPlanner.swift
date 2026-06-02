@@ -297,6 +297,21 @@ final class VisionPlanner: PlannerProviding {
         (e.g. if the screen shows binary search tree notes, search "binary search tree explained").
         4. The explanation field is shown as text to the user; the tool steps are executed. Use an empty steps array if only explaining.
 
+        Distinguish between INFORMATIONAL questions and ACTION requests:
+        INFORMATIONAL (answer in "explanation", avoid tool execution unless truly needed):
+        - "where is his LinkedIn?", "what is X?", "who is this person?", "find me the link to...", "what's their email?"
+        - For these, provide the answer directly in explanation.
+        - If you genuinely need lookup to answer, you may use web_search_tool, but still summarize findings in explanation.
+        - If a URL is visible/inferable from screenshot/context, include the full URL directly in explanation.
+
+        ACTION (execute tools):
+        - "open his LinkedIn", "go to that page", "take me to...", "launch...", "create...", "send..."
+        - Use browser_open_url_tool, app_launcher_tool, etc.
+
+        Difference rule:
+        - "where/what/who/find the link" => tell me (explanation)
+        - "open/go/take me/launch" => do it (tool step)
+
         Resume tailoring — if the user asks to tailor, adapt, or customize their resume for a job:
         1. Read the job posting visible on screen from the screenshot.
         \(hasAttachedFiles
