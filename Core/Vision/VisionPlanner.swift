@@ -18,8 +18,10 @@ final class VisionPlanner: PlannerProviding {
     private let session = URLSession.shared
     private let fallback: ClaudePlanner
 
-    /// Max compressed JPEG size sent to the API (1 MB).
-    private static let maxImageBytes = 1_048_576
+    /// Max compressed JPEG size sent to the API (4 MB).
+    private static let maxImageBytes = 4_194_304
+    /// Claude vision reads best around this long-edge size.
+    private static let targetLongEdge: CGFloat = 1568
 
     init(
         apiKey: String,
@@ -123,31 +125,34 @@ final class VisionPlanner: PlannerProviding {
 
     // MARK: - Image encoding
 
-    /// Resizes and JPEG-compresses the image until it fits within `maxImageBytes`.
+    /// Scales screenshot to Claude-friendly long edge and JPEG-compresses until within size budget.
     private func encodeImage(_ image: NSImage, maxBytes: Int = maxImageBytes) -> String? {
-        var size = image.size
-        var compressionFactor: CGFloat = 0.85
+        let sourceSize = image.size
+        let longest = max(sourceSize.width, sourceSize.height)
+        let scale = longest > Self.targetLongEdge ? (Self.targetLongEdge / longest) : 1.0
+        let size = NSSize(
+            width: max(1, sourceSize.width * scale),
+            height: max(1, sourceSize.height * scale)
+        )
 
-        while true {
-            guard let cgImage = renderCGImage(image, size: size) else { return nil }
-            let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let cgImage = renderCGImage(image, size: size) else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+
+        var compressionFactor: CGFloat = 0.9
+        while compressionFactor >= 0.5 {
             guard let data = rep.representation(
                 using: .jpeg,
                 properties: [.compressionFactor: compressionFactor]
             ) else { return nil }
 
-            if data.count <= maxBytes { return data.base64EncodedString() }
-
-            // Reduce resolution by 25 % each pass; drop quality as a last resort.
-            if size.width > 600 {
-                size = NSSize(width: size.width * 0.75, height: size.height * 0.75)
-            } else if compressionFactor > 0.3 {
-                compressionFactor -= 0.2
-            } else {
-                // Return whatever we have even if it slightly exceeds the limit.
+            if data.count <= maxBytes || compressionFactor <= 0.5 {
                 return data.base64EncodedString()
             }
+
+            compressionFactor -= 0.1
         }
+
+        return nil
     }
 
     private func renderCGImage(_ image: NSImage, size: NSSize) -> CGImage? {
@@ -281,21 +286,51 @@ final class VisionPlanner: PlannerProviding {
         Tool notes:
         - app_launcher_tool can launch ANY application installed on the user's Mac. \
         Pass the app's common display name exactly as the user would say it. The tool resolves name variants automatically.
-        - browser_open_url_tool opens a URL in the default browser. Use it for web destinations rather than launching a browser separately.
+        - browser_open_url_tool opens a URL in the default browser. Use this ONLY when the user explicitly asks to open/navigate \
+        (e.g. "open", "go to", "take me to"). For informational link requests, return URLs in explanation instead.
         - mail_send_tool composes an email using the system mailto: scheme; use it when the user wants to send or draft an email.
         - pdf_create_tool creates a professional PDF from markdown/plain text; savePath is a directory (default ~/Desktop).
         - file_attach_tool copies a file to a destination for email attachments or sharing.
         - file_read_tool extracts text from .txt, .md, .pdf, or .docx files at the given path.
         - resume_find_tool locates the user's resume files on their Mac (newest first). \
         Skip this if the user already attached their resume below.
-        - youtube_search_tool opens YouTube search results in the browser for a focused topic query.
+        - youtube_search_tool opens YouTube in the browser. Use this only for explicit "open/play/go to YouTube" requests.
 
         Screen study / explain — if the user asks you to explain what's on their screen, study help, or understand content:
         1. Look carefully at the screenshot — read any notes, code, diagrams, slides, or text visible.
         2. Write a clear, concise explanation in the "explanation" field of your JSON response (2-4 short paragraphs, plain language, like a good tutor).
-        3. If they also ask for videos or resources, add a youtube_search_tool step with a focused search query based on the main topic \
-        (e.g. if the screen shows binary search tree notes, search "binary search tree explained").
+        3. If they also ask for videos or resources, include focused clickable full URLs in explanation \
+        (e.g. a YouTube search URL or specific video links) and keep steps empty unless they explicitly ask to open one.
         4. The explanation field is shown as text to the user; the tool steps are executed. Use an empty steps array if only explaining.
+
+        Link behavior:
+        - When you want to reference a webpage, video, or online resource, include the full URL in explanation text \
+        rather than opening it automatically.
+        - The user will see clickable links and decide whether to open them.
+        - Only use browser_open_url_tool when the user explicitly says "open", "go to", or "take me to" a site.
+
+        Accuracy rules for reading the screen:
+        - Only state text you can actually read clearly in the screenshot.
+        - NEVER guess or infer details like names, URLs, institutions, or numbers.
+        - If text is too small or blurry, explicitly say "I can't read that clearly" rather than guessing.
+        - If asked for a specific URL or exact text that is not clearly readable, say so explicitly.
+        - Do not infer a university/company/location from partial text. Report only what is literally visible.
+
+        Distinguish between INFORMATIONAL questions and ACTION requests:
+        INFORMATIONAL (answer in "explanation", avoid tool execution unless truly needed):
+        - "where is his LinkedIn?", "what is X?", "who is this person?", "find me the link to...", "what's their email?"
+        - For these, provide the answer directly in explanation.
+        - Prefer returning full clickable URLs in explanation instead of executing browser_open_url_tool.
+        - If you genuinely need lookup to answer, you may use web_search_tool, but still summarize findings in explanation.
+        - If a URL is visible/inferable from screenshot/context, include the full URL directly in explanation.
+
+        ACTION (execute tools):
+        - "open his LinkedIn", "go to that page", "take me to...", "launch...", "create...", "send..."
+        - Use browser_open_url_tool, app_launcher_tool, etc.
+
+        Difference rule:
+        - "where/what/who/find the link" => tell me (explanation)
+        - "open/go/take me/launch" => do it (tool step)
 
         Resume tailoring — if the user asks to tailor, adapt, or customize their resume for a job:
         1. Read the job posting visible on screen from the screenshot.
