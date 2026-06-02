@@ -6,10 +6,12 @@ import UniformTypeIdentifiers
 @MainActor
 final class CommandBarViewModel: ObservableObject {
     @Published var query: String = ""
+    @Published var followUpQuery: String = ""
     @Published var selectedIndex: Int = 0
     @Published var droppedFiles: [URL] = []
     @Published var isProcessing: Bool = false
     @Published var processingStatus: String = ""
+    @Published var hasConversation: Bool = false
 
     private weak var orchestrator: CommandOrchestrator?
     private var searchTask: Task<Void, Never>?
@@ -37,6 +39,16 @@ final class CommandBarViewModel: ObservableObject {
 
     func removeDroppedFile(_ url: URL) {
         droppedFiles.removeAll { $0 == url }
+    }
+
+    var inputPlaceholder: String {
+        hasConversation
+            ? "Ask a follow-up…"
+            : "Ask Oopla to do anything on your Mac..."
+    }
+
+    var hasPendingFollowUpText: Bool {
+        !followUpQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Handles file drops from the command bar. Returns true if at least one file was accepted.
@@ -86,7 +98,33 @@ final class CommandBarViewModel: ObservableObject {
         isProcessing = true
         processingStatus = "Thinking…"
 
-        await orchestrator.planAndRun(query: finalQuery, attachedFiles: droppedFiles)
+        if hasConversation {
+            await orchestrator.continueConversation(query: finalQuery, attachedFiles: droppedFiles)
+        } else {
+            await orchestrator.planAndRun(query: finalQuery, attachedFiles: droppedFiles)
+            // Move the same text into follow-up input once conversation starts.
+            followUpQuery = ""
+        }
+    }
+
+    func submitFollowUp() async {
+        let text = followUpQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        query = text
+        await executeCurrentSelection(results: [])
+        followUpQuery = ""
+    }
+
+    func startNewConversation() {
+        orchestrator?.clearConversation()
+        query = ""
+        followUpQuery = ""
+        selectedIndex = 0
+        droppedFiles = []
+        processingStatus = ""
+        isProcessing = false
+        hasConversation = false
+        onQueryChanged()
     }
 
     // MARK: - Processing lifecycle
@@ -116,6 +154,13 @@ final class CommandBarViewModel: ObservableObject {
                 if Self.isTerminalStatus(status) {
                     self.isProcessing = false
                 }
+            }
+            .store(in: &cancellables)
+
+        orchestrator.$conversation
+            .receive(on: RunLoop.main)
+            .sink { [weak self] turns in
+                self?.hasConversation = !turns.isEmpty
             }
             .store(in: &cancellables)
 

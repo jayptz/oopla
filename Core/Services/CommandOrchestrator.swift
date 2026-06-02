@@ -7,18 +7,20 @@ final class CommandOrchestrator: ObservableObject {
     @Published private(set) var executionState = CommandExecutionState()
     @Published private(set) var pendingConfirmation: ActionPlan?
     @Published private(set) var latestError: String?
+    @Published private(set) var conversation: [ConversationTurn] = []
 
     private let searchService: SearchProviding
     private let planner: PlannerProviding
-    private let visionPlanner: PlannerProviding?
+    private let visionPlanner: VisionPlanner?
     private let registry: ToolRegistry
     private let safetyEvaluator: SafetyEvaluator
     private let logger = Logger(subsystem: "com.oopla.app", category: "orchestrator")
+    private var activeConversationScreenBase64: String?
 
     init(
         searchService: SearchProviding,
         planner: PlannerProviding,
-        visionPlanner: PlannerProviding? = nil,
+        visionPlanner: VisionPlanner? = nil,
         registry: ToolRegistry
     ) {
         self.searchService  = searchService
@@ -33,29 +35,55 @@ final class CommandOrchestrator: ObservableObject {
     }
 
     func planAndRun(query: String, attachedFiles: [URL] = []) async {
+        await runTurn(query: query, attachedFiles: attachedFiles)
+    }
+
+    func continueConversation(query: String, attachedFiles: [URL] = []) async {
+        await runTurn(query: query, attachedFiles: attachedFiles)
+    }
+
+    func clearConversation() {
+        conversation.removeAll()
+        activeConversationScreenBase64 = nil
+        executionState.currentPlan = nil
+        executionState.steps = []
+        executionState.explanation = nil
+        executionState.statusLine = "Ready"
+        latestError = nil
+    }
+
+    private func runTurn(query: String, attachedFiles: [URL]) async {
         latestError = nil
         executionState.explanation = nil
 
         do {
             let plan: ActionPlan
             let attachedContext = await buildAttachedFileContext(from: attachedFiles)
+            let history = Array(conversation.suffix(10))
 
             if shouldEscalateToClaude(query: query, candidates: searchResults) {
                 if requiresVision(query: query), let vp = visionPlanner {
                     executionState.statusLine = "Analyzing screen..."
                     logger.log("Vision mode — query: \"\(query)\"")
-                    plan = try await vp.createPlan(
+                    let shouldRecapture = shouldRefreshScreenContext(query: query) || activeConversationScreenBase64 == nil
+                    let (visionPlan, usedBase64) = try await vp.createPlanWithVisionContext(
                         for: query,
                         candidates: searchResults,
-                        attachedFileContext: attachedContext
+                        attachedFileContext: attachedContext,
+                        history: history,
+                        preferredScreenBase64: activeConversationScreenBase64,
+                        shouldRecapture: shouldRecapture
                     )
+                    activeConversationScreenBase64 = usedBase64 ?? activeConversationScreenBase64
+                    plan = visionPlan
                 } else {
                     executionState.statusLine = "AI planning..."
                     logger.log("Escalating to Claude — query: \"\(query)\"")
                     plan = try await planner.createPlan(
                         for: query,
                         candidates: searchResults,
-                        attachedFileContext: attachedContext
+                        attachedFileContext: attachedContext,
+                        history: history
                     )
                 }
                 logger.log("Claude returned plan with \(plan.steps.count) step(s)")
@@ -76,6 +104,9 @@ final class CommandOrchestrator: ObservableObject {
                 ? "Explanation ready"
                 : "Planned: \(plan.summary)"
 
+            appendConversationTurn(role: "user", content: query)
+            appendConversationTurn(role: "assistant", content: plan.explanation ?? plan.summary)
+
             switch safety.level {
             case .safe:
                 await execute(plan: plan)
@@ -86,6 +117,8 @@ final class CommandOrchestrator: ObservableObject {
         } catch {
             latestError = "Could not create plan: \(error.localizedDescription)"
             executionState.statusLine = "Failed to plan command."
+            appendConversationTurn(role: "user", content: query)
+            appendConversationTurn(role: "assistant", content: "I ran into an issue: \(error.localizedDescription)")
         }
     }
 
@@ -122,6 +155,24 @@ final class CommandOrchestrator: ObservableObject {
         The user has attached the following file(s) as context:
         \(sections.joined(separator: "\n\n"))
         """
+    }
+
+    private func appendConversationTurn(role: String, content: String) {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        conversation.append(ConversationTurn(role: role, content: trimmed))
+        if conversation.count > 20 {
+            conversation = Array(conversation.suffix(20))
+        }
+    }
+
+    private func shouldRefreshScreenContext(query: String) -> Bool {
+        let q = query.lowercased()
+        return q.contains("look again")
+            || q.contains("again")
+            || q.contains("now")
+            || q.contains("current screen")
+            || q.contains("what's on my screen now")
     }
 
     // MARK: - Vision gate

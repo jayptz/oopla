@@ -37,16 +37,38 @@ final class VisionPlanner: PlannerProviding {
     func createPlan(
         for query: String,
         candidates: [SearchResultItem],
-        attachedFileContext: String?
+        attachedFileContext: String?,
+        history: [ConversationTurn]
     ) async throws -> ActionPlan {
+        let (plan, _) = try await createPlanWithVisionContext(
+            for: query,
+            candidates: candidates,
+            attachedFileContext: attachedFileContext,
+            history: history,
+            preferredScreenBase64: nil,
+            shouldRecapture: true
+        )
+        return plan
+    }
+
+    func createPlanWithVisionContext(
+        for query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?,
+        history: [ConversationTurn],
+        preferredScreenBase64: String?,
+        shouldRecapture: Bool
+    ) async throws -> (ActionPlan, String?) {
         // Attempt screen capture. On failure, fall back to text-only planning
         // so the user still gets an answer even without Screen Recording permission.
-        let base64: String?
-        do {
-            let image = try await captureService.captureScreen()
-            base64 = encodeImage(image)
-        } catch {
-            base64 = nil
+        var base64 = preferredScreenBase64
+        if base64 == nil || shouldRecapture {
+            do {
+                let image = try await captureService.captureScreen()
+                base64 = encodeImage(image)
+            } catch {
+                base64 = preferredScreenBase64
+            }
         }
 
         let hasAttached = attachedFileContext != nil && !(attachedFileContext?.isEmpty ?? true)
@@ -68,15 +90,17 @@ final class VisionPlanner: PlannerProviding {
         )
 
         if let b64 = base64 {
-            let json = try await callClaudeWithVision(prompt: prompt, base64JPEG: b64)
-            return try parsePlan(json: json, query: query)
+            let json = try await callClaudeWithVision(prompt: prompt, base64JPEG: b64, history: history)
+            return (try parsePlan(json: json, query: query), b64)
         } else {
             // No screenshot available — delegate to the text-only planner.
-            return try await fallback.createPlan(
+            let fallbackPlan = try await fallback.createPlan(
                 for: query,
                 candidates: candidates,
-                attachedFileContext: attachedFileContext
+                attachedFileContext: attachedFileContext,
+                history: history
             )
+            return (fallbackPlan, nil)
         }
     }
 
@@ -141,7 +165,7 @@ final class VisionPlanner: PlannerProviding {
 
     // MARK: - API call (vision)
 
-    private func callClaudeWithVision(prompt: String, base64JPEG: String) async throws -> String {
+    private func callClaudeWithVision(prompt: String, base64JPEG: String, history: [ConversationTurn]) async throws -> String {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
 
         var request = URLRequest(url: url)
@@ -164,12 +188,18 @@ final class VisionPlanner: PlannerProviding {
             "text": prompt
         ]
 
+        var messages: [[String: Any]] = history.suffix(10).map { turn in
+            [
+                "role": turn.role == "assistant" ? "assistant" : "user",
+                "content": turn.content,
+            ]
+        }
+        messages.append(["role": "user", "content": [imageBlock, textBlock]])
+
         let body: [String: Any] = [
             "model":      model,
             "max_tokens": 2048,
-            "messages": [
-                ["role": "user", "content": [imageBlock, textBlock]]
-            ]
+            "messages": messages
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)

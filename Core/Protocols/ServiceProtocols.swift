@@ -8,7 +8,8 @@ protocol PlannerProviding {
     func createPlan(
         for query: String,
         candidates: [SearchResultItem],
-        attachedFileContext: String?
+        attachedFileContext: String?,
+        history: [ConversationTurn]
     ) async throws -> ActionPlan
 }
 

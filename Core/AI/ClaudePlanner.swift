@@ -41,14 +41,15 @@ final class ClaudePlanner: PlannerProviding {
     func createPlan(
         for query: String,
         candidates: [SearchResultItem],
-        attachedFileContext: String?
+        attachedFileContext: String?,
+        history: [ConversationTurn]
     ) async throws -> ActionPlan {
         let prompt = buildPrompt(
             query: query,
             candidates: candidates,
             attachedFileContext: attachedFileContext
         )
-        let json = try await callClaude(prompt: prompt)
+        let json = try await callClaude(prompt: prompt, history: history)
         return try parsePlan(json: json, query: query)
     }
 
@@ -161,7 +162,7 @@ final class ClaudePlanner: PlannerProviding {
 
     // MARK: - API Call
 
-    private func callClaude(prompt: String) async throws -> String {
+    private func callClaude(prompt: String, history: [ConversationTurn]) async throws -> String {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
 
         var request = URLRequest(url: url)
@@ -170,12 +171,18 @@ final class ClaudePlanner: PlannerProviding {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
+        var messages: [[String: Any]] = history.suffix(10).map { turn in
+            [
+                "role": turn.role == "assistant" ? "assistant" : "user",
+                "content": turn.content,
+            ]
+        }
+        messages.append(["role": "user", "content": prompt])
+
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,
-            "messages": [
-                ["role": "user", "content": prompt]
-            ]
+            "messages": messages
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
