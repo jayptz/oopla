@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import UniformTypeIdentifiers
 
@@ -7,12 +8,16 @@ final class CommandBarViewModel: ObservableObject {
     @Published var query: String = ""
     @Published var selectedIndex: Int = 0
     @Published var droppedFiles: [URL] = []
+    @Published var isProcessing: Bool = false
+    @Published var processingStatus: String = ""
 
     private weak var orchestrator: CommandOrchestrator?
     private var searchTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
     func bind(orchestrator: CommandOrchestrator) {
         self.orchestrator = orchestrator
+        bindLifecycleUpdates(orchestrator: orchestrator)
     }
 
     func onQueryChanged() {
@@ -61,6 +66,8 @@ final class CommandBarViewModel: ObservableObject {
 
     func executeCurrentSelection(results: [SearchResultItem]) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty && droppedFiles.isEmpty { return }
+
         if !results.isEmpty, selectedIndex < results.count {
             let selected = results[selectedIndex]
             switch selected.kind {
@@ -72,8 +79,64 @@ final class CommandBarViewModel: ObservableObject {
                 break
             }
         }
-        if !trimmed.isEmpty || !droppedFiles.isEmpty {
-            await orchestrator?.planAndRun(query: trimmed.isEmpty ? "Use attached file" : query, attachedFiles: droppedFiles)
-        }
+        let finalQuery = trimmed.isEmpty ? "Use attached file" : query
+        guard let orchestrator else { return }
+
+        // Instant user feedback when Enter is pressed.
+        isProcessing = true
+        processingStatus = "Thinking…"
+
+        await orchestrator.planAndRun(query: finalQuery, attachedFiles: droppedFiles)
+    }
+
+    // MARK: - Processing lifecycle
+
+    private func bindLifecycleUpdates(orchestrator: CommandOrchestrator) {
+        cancellables.removeAll()
+
+        orchestrator.$executionState
+            .receive(on: RunLoop.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                let status = state.statusLine
+                if status.isEmpty { return }
+
+                if status.localizedCaseInsensitiveContains("Analyzing screen") {
+                    self.processingStatus = "Analyzing screen…"
+                } else if status.localizedCaseInsensitiveContains("planning")
+                            || status.localizedCaseInsensitiveContains("planned") {
+                    self.processingStatus = "Planning…"
+                } else if status.localizedCaseInsensitiveContains("executing")
+                            || status.localizedCaseInsensitiveContains("running") {
+                    self.processingStatus = "Running…"
+                } else {
+                    self.processingStatus = status
+                }
+
+                if Self.isTerminalStatus(status) {
+                    self.isProcessing = false
+                }
+            }
+            .store(in: &cancellables)
+
+        orchestrator.$latestError
+            .receive(on: RunLoop.main)
+            .sink { [weak self] error in
+                guard let self else { return }
+                if error != nil {
+                    self.isProcessing = false
+                    self.processingStatus = "Failed."
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private static func isTerminalStatus(_ status: String) -> Bool {
+        let s = status.lowercased()
+        return s == "done."
+            || s == "cancelled."
+            || s.contains("failed")
+            || s.contains("execution stopped")
+            || s.contains("confirmation required")
     }
 }

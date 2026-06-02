@@ -68,6 +68,7 @@ struct OoplaApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var resignObserver: NSObjectProtocol?
 
     var body: some View {
         ZStack {
@@ -84,6 +85,10 @@ struct RootView: View {
         .background(Color.clear)
         .onAppear {
             configureAndHideWindow()
+            installWindowObservers()
+        }
+        .onDisappear {
+            removeWindowObservers()
         }
         .onChange(of: appState.isCommandBarVisible) { visible in
             if visible {
@@ -105,13 +110,19 @@ struct RootView: View {
 
     private func configureAndHideWindow() {
         guard let w = mainWindow else { return }
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
         w.isOpaque = false
         w.backgroundColor = .clear
         w.styleMask = [.borderless, .fullSizeContentView]
+        w.standardWindowButton(.closeButton)?.isHidden = true
+        w.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        w.standardWindowButton(.zoomButton)?.isHidden = true
         w.level = .floating
-        w.collectionBehavior = [.transient, .canJoinAllSpaces, .ignoresCycle]
-        w.hasShadow = true
-        w.isMovable = false
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.hasShadow = false
+        w.isMovable = true
+        w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
         w.orderOut(nil)
     }
@@ -120,13 +131,35 @@ struct RootView: View {
         guard let w = mainWindow else { return }
         guard let screen = w.screen ?? NSScreen.main else { return }
         let sz = w.frame
-        let x  = screen.visibleFrame.midX - sz.width / 2
-        let y  = screen.visibleFrame.maxY  - sz.height - screen.visibleFrame.height / 3
+        let x = screen.visibleFrame.midX - sz.width / 2
+        // Centered horizontally, about 20% down from top (Spotlight-like).
+        let y = screen.visibleFrame.maxY - (screen.visibleFrame.height * 0.2) - (sz.height / 2)
         w.setFrameOrigin(NSPoint(x: x, y: y))
         w.makeKeyAndOrderFront(nil)
     }
 
     private func hideWindow() {
         mainWindow?.orderOut(nil)
+    }
+
+    private func installWindowObservers() {
+        guard resignObserver == nil else { return }
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // Spotlight-like click-away dismissal.
+            Task { @MainActor in
+                appState.isCommandBarVisible = false
+            }
+        }
+    }
+
+    private func removeWindowObservers() {
+        if let observer = resignObserver {
+            NotificationCenter.default.removeObserver(observer)
+            resignObserver = nil
+        }
     }
 }

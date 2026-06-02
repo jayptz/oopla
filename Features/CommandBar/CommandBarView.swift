@@ -11,6 +11,8 @@ struct CommandBarView: View {
     @FocusState private var focused: Bool
     @Namespace private var glassNamespace
     @State private var isDragTarget = false
+    @State private var showSubmittedCheckmark = false
+    @State private var indicatorPhase: CGFloat = -0.9
 
     private static let dropTypes: [UTType] = [
         .fileURL,
@@ -40,14 +42,31 @@ struct CommandBarView: View {
                 // ── Search input ────────────────────────────────────────
                 ZStack {
                     HStack(spacing: 12) {
-                        Image(systemName: "sparkles")
-                            .font(.title3)
-                            .foregroundStyle(.primary)
+                        Group {
+                            if viewModel.isProcessing {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 18, height: 18)
+                            } else if showSubmittedCheckmark {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.green)
+                                    .frame(width: 18, height: 18)
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .font(.title3)
+                                    .foregroundStyle(.primary)
+                            }
+                        }
+                        .animation(.easeInOut(duration: 0.2), value: viewModel.isProcessing)
+                        .animation(.easeInOut(duration: 0.2), value: showSubmittedCheckmark)
 
                         TextField("Ask Oopla to do anything on your Mac...", text: $viewModel.query)
                             .textFieldStyle(.plain)
                             .font(.title3)
                             .focused($focused)
+                            .disabled(viewModel.isProcessing)
+                            .opacity(viewModel.isProcessing ? 0.82 : 1.0)
                             .onChange(of: viewModel.query) { _ in
                                 viewModel.onQueryChanged()
                             }
@@ -82,6 +101,31 @@ struct CommandBarView: View {
                     }
                 }
                 .animation(.easeInOut(duration: 0.18), value: isDragTarget)
+
+                if viewModel.isProcessing {
+                    ProcessingPulseBar(phase: indicatorPhase)
+                        .frame(height: 3)
+                        .padding(.horizontal, 8)
+                        .transition(.opacity)
+                        .onAppear {
+                            indicatorPhase = -0.9
+                            withAnimation(
+                                .linear(duration: 1.0)
+                                .repeatForever(autoreverses: false)
+                            ) {
+                                indicatorPhase = 1.1
+                            }
+                        }
+                }
+
+                if !viewModel.processingStatus.isEmpty {
+                    Text(viewModel.processingStatus)
+                        .font(.caption)
+                        .foregroundStyle(viewModel.isProcessing ? Color.secondary : Color.green)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 6)
+                        .animation(.easeInOut(duration: 0.2), value: viewModel.processingStatus)
+                }
 
                 // ── Results list ────────────────────────────────────────
                 if !orchestrator.searchResults.isEmpty {
@@ -143,6 +187,13 @@ struct CommandBarView: View {
             viewModel.onQueryChanged()
             focused = true
         }
+        .onChange(of: viewModel.isProcessing) { isProcessing in
+            guard !isProcessing else { return }
+            showSubmittedCheckmark = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                showSubmittedCheckmark = false
+            }
+        }
         .sheet(item: Binding<ActionPlan?>(
             get: { orchestrator.pendingConfirmation },
             set: { _ in }
@@ -171,6 +222,37 @@ struct CommandBarView: View {
             viewModel.selectedIndex = max(viewModel.selectedIndex - 1, 0)
         default:
             break
+        }
+    }
+}
+
+private struct ProcessingPulseBar: View {
+    let phase: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let pulseWidth = max(width * 0.33, 80)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.12))
+
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.cyan.opacity(0.10),
+                                Color.cyan.opacity(0.85),
+                                Color.cyan.opacity(0.10),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: pulseWidth)
+                    .offset(x: (width + pulseWidth) * phase - pulseWidth)
+            }
+            .glassEffect(in: Capsule())
         }
     }
 }
