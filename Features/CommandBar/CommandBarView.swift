@@ -418,51 +418,61 @@ private struct ConversationRow: View {
 }
 
 private struct ConversationTextWithLinks: View {
+    @Environment(\.openURL) private var openURL
     let text: String
 
     var body: some View {
-        let parts = splitTextWithURLs(text)
-        VStack(alignment: .leading, spacing: 2) {
-            ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
-                if let url = part.url {
-                    Link(part.text, destination: url)
-                        .font(.subheadline)
-                        .foregroundStyle(.cyan)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text(part.text)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+        Text(makeAttributedText(text))
+            .font(.subheadline)
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            .environment(\.openURL, OpenURLAction { url in
+                NSWorkspace.shared.open(url)
+                return .handled
+            })
+            .onTapGesture {
+                // Fallback for non-link tap handling in borderless windows.
+                let urls = detectURLs(in: text)
+                if urls.count == 1, let only = urls.first {
+                    openURL(only)
                 }
             }
-        }
     }
 
-    private func splitTextWithURLs(_ value: String) -> [(text: String, url: URL?)] {
+    private func makeAttributedText(_ value: String) -> AttributedString {
+        let mutable = NSMutableAttributedString(string: value)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+        mutable.addAttributes([
+            .foregroundColor: NSColor.labelColor
+        ], range: fullRange)
+
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
-            return [(value, nil)]
+            return AttributedString(mutable)
+        }
+
+        for match in detector.matches(in: value, options: [], range: NSRange(location: 0, length: (value as NSString).length)) {
+            guard let url = match.url else { continue }
+            mutable.addAttributes([
+                .link: url,
+                .foregroundColor: NSColor.systemCyan,
+                .underlineStyle: NSUnderlineStyle.single.rawValue
+            ], range: match.range)
+        }
+
+        return AttributedString(mutable)
+    }
+
+    private func detectURLs(in value: String) -> [URL] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return []
         }
         let ns = value as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        let matches = detector.matches(in: value, options: [], range: range)
-        guard !matches.isEmpty else { return [(value, nil)] }
-
-        var cursor = 0
-        var chunks: [(String, URL?)] = []
-        for m in matches {
-            if m.range.location > cursor {
-                chunks.append((ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor)), nil))
-            }
-            let urlText = ns.substring(with: m.range)
-            let url = m.url ?? URL(string: urlText)
-            chunks.append((urlText, url))
-            cursor = m.range.location + m.range.length
+        let matches = detector.matches(in: value, options: [], range: NSRange(location: 0, length: ns.length))
+        return matches.compactMap { match in
+            if let direct = match.url { return direct }
+            let raw = ns.substring(with: match.range)
+            return URL(string: raw)
         }
-        if cursor < ns.length {
-            chunks.append((ns.substring(with: NSRange(location: cursor, length: ns.length - cursor)), nil))
-        }
-        return chunks
     }
 }
 
