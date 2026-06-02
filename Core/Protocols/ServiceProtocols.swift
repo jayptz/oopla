@@ -5,7 +5,12 @@ protocol SearchProviding {
 }
 
 protocol PlannerProviding {
-    func createPlan(for query: String, candidates: [SearchResultItem]) async throws -> ActionPlan
+    func createPlan(
+        for query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?,
+        history: [ConversationTurn]
+    ) async throws -> ActionPlan
 }
 
 protocol ToolProtocol {

@@ -5,7 +5,12 @@ enum PlannerError: Error {
 }
 
 final class MockPlanner: PlannerProviding {
-    func createPlan(for query: String, candidates: [SearchResultItem]) async throws -> ActionPlan {
+    func createPlan(
+        for query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?,
+        history: [ConversationTurn]
+    ) async throws -> ActionPlan {
         let q = query.lowercased()
 
         if q.contains("open chrome") && q.contains("youtube") {

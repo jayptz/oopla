@@ -5,11 +5,39 @@ import Foundation
 
 final class LocalSearchIndex: SearchProviding {
 
+    /// Keeps the in-flight Spotlight query alive until it finishes or is cancelled.
+    private var activeSpotlight: SpotlightState?
+
     // MARK: - Entry point
 
     func search(query: String) async -> [SearchResultItem] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return await emptyQuerySuggestions() }
+        guard !q.isEmpty else {
+            activeSpotlight?.cancel()
+            activeSpotlight = nil
+            return await emptyQuerySuggestions()
+        }
+
+        // Each new keystroke cancels any in-flight Spotlight query.
+        activeSpotlight?.cancel()
+        activeSpotlight = nil
+
+        let words = q.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+
+        // Natural-language guard: queries with more than 3 words are almost
+        // certainly not launcher commands. Run only the app search, and only
+        // keep results where a word in the query EXACTLY matches the app name.
+        // Everything else is left to Claude so the sidebar stays clean.
+        if words.count > 3 {
+            let appResults = await searchApps(query: q)
+            var results = appResults.filter { item in
+                words.contains { $0.lowercased() == item.title.lowercased() }
+            }
+            if let suggestion = aiIntentSuggestion(for: q) {
+                results.insert(suggestion, at: 0)
+            }
+            return Array(results.prefix(6))
+        }
 
         // Pure-computation results are synchronous and always rank highest.
         let computed = quickCompute(query: q)
@@ -212,13 +240,66 @@ final class LocalSearchIndex: SearchProviding {
     // MARK: - NSMetadataQuery (Spotlight index)
 
     private func spotlightSearch(query: String) async -> [SearchResultItem] {
-        // For very short terms, Spotlight returns too many noisy results.
         guard query.count >= 2 else { return [] }
 
+        // Cancel any previous query so its continuation is always resumed.
+        activeSpotlight?.cancel()
+        activeSpotlight = nil
+
         return await withCheckedContinuation { continuation in
-            let state = SpotlightState(query: query, continuation: continuation)
+            let state = SpotlightState(query: query) { [weak self] results in
+                self?.activeSpotlight = nil
+                continuation.resume(returning: results)
+            }
+            self.activeSpotlight = state
             state.start()
         }
+    }
+
+    // MARK: - AI intent suggestions (long natural-language queries)
+
+    private func aiIntentSuggestion(for query: String) -> SearchResultItem? {
+        let q = query.lowercased()
+        let mentionsResume = q.contains("resume") || q.contains(" cv")
+        let mentionsTailor = ["tailor", "customize", "customise", "adapt", "adjust", "rewrite"]
+            .contains { q.contains($0) }
+
+        if mentionsResume && mentionsTailor {
+            return SearchResultItem(
+                title: "Tailor resume for this job",
+                subtitle: "Press Enter — reads the job on screen and your resume",
+                kind: .aiAction,
+                score: 1.0
+            )
+        }
+
+        let explainPhrases = [
+            "explain what's on", "explain what is on", "explain this", "explain my screen",
+            "study help", "help me understand", "youtube video"
+        ]
+        if explainPhrases.contains(where: { q.contains($0) }) {
+            return SearchResultItem(
+                title: "Explain what's on screen",
+                subtitle: "Press Enter — reads your screen and shows an explanation",
+                kind: .aiAction,
+                score: 1.0
+            )
+        }
+
+        let visionPhrases = [
+            "screen", "look at", "what's on", "this job", "job application",
+            "this email", "see my", "on screen"
+        ]
+        if visionPhrases.contains(where: { q.contains($0) }) && mentionsResume {
+            return SearchResultItem(
+                title: "AI: \(query)",
+                subtitle: "Press Enter — uses screen context",
+                kind: .aiAction,
+                score: 0.95
+            )
+        }
+
+        return nil
     }
 
     // MARK: - Empty query suggestions
@@ -261,13 +342,20 @@ final class LocalSearchIndex: SearchProviding {
 
     // MARK: - Scoring helpers
 
-    /// Returns true if the query is a substring of the target or vice-versa,
-    /// or if the query is a prefix of any word in the target.
+    /// Returns true if the target (app name) contains the query, or if the
+    /// query is a prefix of any individual word in the target.
+    ///
+    /// NOTE: We intentionally do NOT check `q.contains(t)` (whether the query
+    /// contains the app name), because a long natural-language query like
+    /// "what is my screen showing" would then match any short app name whose
+    /// letters happen to appear in the query string (e.g. "R.app" matches
+    /// because "screen" contains the letter 'r').
     func fuzzyMatch(query: String, target: String) -> Bool {
         let q = query.lowercased()
         let t = target.lowercased()
-        if t.contains(q) || q.contains(t) { return true }
-        // Partial word prefix match: "spo" matches "Spotify Music" via the word "Spotify".
+        // App name contains the query term.
+        if t.contains(q) { return true }
+        // Partial word prefix: "spo" matches "Spotify Music" via the word "Spotify".
         return t.components(separatedBy: .whitespaces).contains { $0.hasPrefix(q) }
     }
 
@@ -285,18 +373,21 @@ final class LocalSearchIndex: SearchProviding {
 // MARK: - SpotlightState
 
 /// Manages an NSMetadataQuery lifecycle across the async boundary.
-/// Holds a strong reference to the query so ARC doesn't collect it
-/// before the search finishes.
+/// Must be retained by `LocalSearchIndex.activeSpotlight` until `finish` runs.
 private final class SpotlightState {
-    private let mdQuery    = NSMetadataQuery()
-    private let rawQuery   : String
-    private let continuation: CheckedContinuation<[SearchResultItem], Never>
-    private var observer   : NSObjectProtocol?
-    private var finished   = false
+    private let mdQuery = NSMetadataQuery()
+    private let rawQuery: String
+    private let onComplete: ([SearchResultItem]) -> Void
+    private var observer: NSObjectProtocol?
+    private var finished = false
 
-    init(query: String, continuation: CheckedContinuation<[SearchResultItem], Never>) {
-        self.rawQuery     = query
-        self.continuation = continuation
+    init(query: String, onComplete: @escaping ([SearchResultItem]) -> Void) {
+        self.rawQuery = query
+        self.onComplete = onComplete
+    }
+
+    deinit {
+        cancel()
     }
 
     func start() {
@@ -315,12 +406,11 @@ private final class SpotlightState {
             object: mdQuery,
             queue: .main
         ) { [weak self] _ in
-            self?.complete()
+            self?.finish(with: self?.gatherResults() ?? [])
         }
 
-        // Timeout: resume with whatever has been gathered so far.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.complete()
+            self?.finish(with: self?.gatherResults() ?? [])
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -328,7 +418,12 @@ private final class SpotlightState {
         }
     }
 
-    private func complete() {
+    /// Stops the query and resumes the waiter with no results.
+    func cancel() {
+        finish(with: [])
+    }
+
+    private func finish(with results: [SearchResultItem]) {
         guard !finished else { return }
         finished = true
 
@@ -336,8 +431,15 @@ private final class SpotlightState {
             NotificationCenter.default.removeObserver(obs)
             observer = nil
         }
-        mdQuery.stop()
 
+        if mdQuery.isStarted {
+            mdQuery.stop()
+        }
+
+        onComplete(results)
+    }
+
+    private func gatherResults() -> [SearchResultItem] {
         var results: [SearchResultItem] = []
         mdQuery.disableUpdates()
 
@@ -348,14 +450,13 @@ private final class SpotlightState {
             guard let item = mdQuery.result(at: i) as? NSMetadataItem else { continue }
 
             guard let name = item.value(forAttribute: NSMetadataItemDisplayNameKey) as? String,
-                  !name.hasPrefix(".")    // skip hidden files
+                  !name.hasPrefix(".")
             else { continue }
 
-            let path         = item.value(forAttribute: NSMetadataItemPathKey) as? String
-            let lastUsed     = item.value(forAttribute: NSMetadataItemLastUsedDateKey) as? Date
-            let contentType  = item.value(forAttribute: NSMetadataItemContentTypeKey) as? String ?? ""
+            let path        = item.value(forAttribute: NSMetadataItemPathKey) as? String
+            let lastUsed    = item.value(forAttribute: NSMetadataItemLastUsedDateKey) as? Date
+            let contentType = item.value(forAttribute: NSMetadataItemContentTypeKey) as? String ?? ""
 
-            // Kind resolution.
             let kind: ResultKind
             if contentType == "public.folder"
                 || contentType.hasSuffix(".folder")
@@ -365,11 +466,9 @@ private final class SpotlightState {
                 kind = .file
             }
 
-            // Recency-based score.
             let isRecent = lastUsed.map { $0 > sevenDaysAgo } ?? false
             let score: Double = isRecent ? 0.85 : 0.75
 
-            // Human-readable subtitle.
             let ext = (name as NSString).pathExtension.uppercased()
             let dateLabel: String
             if let used = lastUsed {
@@ -378,11 +477,10 @@ private final class SpotlightState {
                 dateLabel = "Unknown"
             }
             let typeLabel = ext.isEmpty ? "File" : ext
-            let subtitle  = "\(typeLabel) • \(dateLabel)"
 
             results.append(SearchResultItem(
                 title: name,
-                subtitle: subtitle,
+                subtitle: "\(typeLabel) • \(dateLabel)",
                 kind: kind,
                 path: path,
                 score: score
@@ -390,6 +488,6 @@ private final class SpotlightState {
         }
 
         mdQuery.enableUpdates()
-        continuation.resume(returning: results)
+        return results
     }
 }

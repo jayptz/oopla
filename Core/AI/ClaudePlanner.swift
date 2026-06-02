@@ -19,6 +19,7 @@ private struct PlannedAction: Decodable {
 
 private struct ClaudePlan: Decodable {
     let summary: String
+    let explanation: String?
     let requiresConfirmation: Bool
     let steps: [PlannedAction]
 }
@@ -37,15 +38,28 @@ final class ClaudePlanner: PlannerProviding {
         self.session = URLSession.shared
     }
 
-    func createPlan(for query: String, candidates: [SearchResultItem]) async throws -> ActionPlan {
-        let prompt = buildPrompt(query: query, candidates: candidates)
-        let json = try await callClaude(prompt: prompt)
+    func createPlan(
+        for query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?,
+        history: [ConversationTurn]
+    ) async throws -> ActionPlan {
+        let prompt = buildPrompt(
+            query: query,
+            candidates: candidates,
+            attachedFileContext: attachedFileContext
+        )
+        let json = try await callClaude(prompt: prompt, history: history)
         return try parsePlan(json: json, query: query)
     }
 
     // MARK: - Prompt
 
-    private func buildPrompt(query: String, candidates: [SearchResultItem]) -> String {
+    private func buildPrompt(
+        query: String,
+        candidates: [SearchResultItem],
+        attachedFileContext: String?
+    ) -> String {
         let candidateList = candidates.prefix(8).map { item in
             "- [\(item.kind.rawValue)] \(item.title)\(item.path.map { " (path: \($0))" } ?? "")"
         }.joined(separator: "\n")
@@ -61,15 +75,22 @@ final class ClaudePlanner: PlannerProviding {
         clipboard_read_tool      | args: (none)
         finder_reveal_tool       | args: path (string)
         mail_send_tool           | args: to, subject, body, attachmentPath (optional) [confirmationRequired]
-        pdf_create_tool          | args: content, filename, savePath
+        pdf_create_tool          | args: content, filename, savePath (optional — defaults to ~/Desktop) [confirmationRequired]
         file_attach_tool         | args: path, destination
+        file_read_tool           | args: path (string)
+        resume_find_tool         | args: (none)
+        youtube_search_tool      | args: query (string), count (string, optional, default "3")
         """
+
+        let attachedSection = attachedFileContext.map { "\n\($0)\n" } ?? ""
+        let hasAttachedFiles = attachedFileContext != nil && !(attachedFileContext?.isEmpty ?? true)
 
         return """
         You are Oopla, an AI command bar for macOS. Your job is to convert a user's natural language command into a structured action plan.
 
         Note: a screenshot of the user's current screen may be attached to some requests as an image. \
         When present, use what you see on screen to fill in arguments (e.g. names, subjects, content).
+        \(attachedSection)
 
         Available tools:
         \(tools)
@@ -86,8 +107,27 @@ final class ClaudePlanner: PlannerProviding {
         - For "open <app> and go to <url>" commands, use app_launcher_tool first then \
         browser_open_url_tool for the URL.
         - mail_send_tool composes an email using the system mailto: scheme; confirmation always required.
-        - pdf_create_tool writes a PDF to disk from plain-text or markdown content; savePath is a directory.
+        - pdf_create_tool creates a professional PDF from markdown/plain text; savePath is a directory (default ~/Desktop).
         - file_attach_tool copies a file to a destination folder for sharing or email attachment.
+        - file_read_tool extracts text from .txt, .md, .pdf, or .docx files at the given path.
+        - resume_find_tool locates the user's resume files on their Mac (newest first). \
+        Skip this if the user already attached their resume as context below.
+        - youtube_search_tool opens YouTube search results in the browser for a topic (does not scrape individual URLs).
+
+        Screen study / explain — if the user asks to explain what's on screen, study help, or understand content \
+        (and a screenshot may be attached):
+        1. Write a clear, concise explanation in the "explanation" JSON field (2-4 short paragraphs, plain language, like a good tutor).
+        2. Use an empty steps array if no tools are needed, or add youtube_search_tool if they want videos/resources.
+        3. The explanation is shown as text in the UI; tool steps are executed separately.
+
+        Resume tailoring — if the user asks to tailor, adapt, or customize their resume for a job:
+        \(hasAttachedFiles
+            ? "- The user dropped their resume file(s) — use ONLY that attached content. Do NOT use resume_find_tool or file_read_tool for the resume."
+            : "- Use resume_find_tool then file_read_tool to load their resume if not attached.")
+        - Use job posting details from the screen (when provided via vision) or the user's command.
+        - Write a tailored resume using ONLY real experience from their actual resume — never fabricate jobs, skills, or qualifications.
+        - Put the full tailored resume markdown in pdf_create_tool's content argument.
+        - Name the file Resume_[CompanyName].pdf and set requiresConfirmation to true.
 
         Local search candidates already found:
         \(candidateList.isEmpty ? "(none)" : candidateList)
@@ -95,16 +135,19 @@ final class ClaudePlanner: PlannerProviding {
         User command: "\(query)"
 
         Rules:
+        - Use attached file content when the user dropped files — it is already provided above.
         - Use the local candidates when they are relevant (e.g. if user says "open my resume" and a resume file is in candidates, use file_open_tool with its path).
         - For multi-step commands (e.g. "open chrome and go to youtube"), produce multiple steps in order.
         - Set requiresConfirmation to true if any step creates, moves, deletes, or modifies files/folders.
-        - Keep summary short (one sentence).
+        - NEVER invent resume content — only use facts from the user's real resume.
+        - Keep summary short (one sentence) but include job context for resume flows.
         - Only use tools from the list above.
         - All argument values must be strings.
 
-        Respond ONLY with a valid JSON object in this exact format, no markdown, no explanation:
+        Respond ONLY with a valid JSON object in this exact format (no markdown fences):
         {
           "summary": "short description of what you will do",
+          "explanation": "detailed explanation for the user, or null if not an explain/study request",
           "requiresConfirmation": false,
           "steps": [
             {
@@ -119,7 +162,7 @@ final class ClaudePlanner: PlannerProviding {
 
     // MARK: - API Call
 
-    private func callClaude(prompt: String) async throws -> String {
+    private func callClaude(prompt: String, history: [ConversationTurn]) async throws -> String {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
 
         var request = URLRequest(url: url)
@@ -128,12 +171,18 @@ final class ClaudePlanner: PlannerProviding {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
+        var messages: [[String: Any]] = history.suffix(10).map { turn in
+            [
+                "role": turn.role == "assistant" ? "assistant" : "user",
+                "content": turn.content,
+            ]
+        }
+        messages.append(["role": "user", "content": prompt])
+
         let body: [String: Any] = [
             "model": model,
             "max_tokens": 1024,
-            "messages": [
-                ["role": "user", "content": prompt]
-            ]
+            "messages": messages
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -186,7 +235,8 @@ final class ClaudePlanner: PlannerProviding {
             userQuery: query,
             summary: plan.summary,
             steps: steps,
-            requiresConfirmation: plan.requiresConfirmation
+            requiresConfirmation: plan.requiresConfirmation,
+            explanation: plan.explanation
         )
     }
 }
