@@ -110,36 +110,44 @@ struct RootView: View {
 
     private func configureAndHideWindow() {
         guard let w = mainWindow else { return }
-        w.titlebarAppearsTransparent = true
-        w.titleVisibility = .hidden
-        w.isOpaque = false
-        w.backgroundColor = .clear
-        w.styleMask = [.borderless, .fullSizeContentView]
-        w.standardWindowButton(.closeButton)?.isHidden = true
-        w.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        w.standardWindowButton(.zoomButton)?.isHidden = true
-        w.level = .floating
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        w.hasShadow = false
-        w.isMovable = true
-        w.isMovableByWindowBackground = true
-        w.isReleasedWhenClosed = false
+        applyBorderlessStyle(to: w)
         w.orderOut(nil)
     }
 
     private func showWindow() {
         guard let w = mainWindow else { return }
+        // Re-apply every time because WindowGroup may restore chrome.
+        applyBorderlessStyle(to: w)
         guard let screen = w.screen ?? NSScreen.main else { return }
         let sz = w.frame
         let x = screen.visibleFrame.midX - sz.width / 2
         // Centered horizontally, about 20% down from top (Spotlight-like).
         let y = screen.visibleFrame.maxY - (screen.visibleFrame.height * 0.2) - (sz.height / 2)
         w.setFrameOrigin(NSPoint(x: x, y: y))
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKey()
         w.makeKeyAndOrderFront(nil)
     }
 
     private func hideWindow() {
         mainWindow?.orderOut(nil)
+    }
+
+    private func applyBorderlessStyle(to w: NSWindow) {
+        w.styleMask = [.borderless, .fullSizeContentView]
+        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .hidden
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.hasShadow = false
+        w.standardWindowButton(.closeButton)?.isHidden = true
+        w.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        w.standardWindowButton(.zoomButton)?.isHidden = true
+        w.level = .floating
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.isMovableByWindowBackground = true
+        w.isMovable = true
+        w.isReleasedWhenClosed = false
     }
 
     private func installWindowObservers() {
