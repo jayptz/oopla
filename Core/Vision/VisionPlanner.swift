@@ -25,7 +25,7 @@ final class VisionPlanner: PlannerProviding {
 
     init(
         apiKey: String,
-        model: String = "claude-sonnet-4-20250514",
+        model: String = "claude-sonnet-4-6",
         captureService: ScreenCaptureService
     ) {
         self.apiKey          = apiKey

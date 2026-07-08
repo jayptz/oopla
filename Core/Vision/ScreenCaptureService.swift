@@ -3,7 +3,7 @@ import ScreenCaptureKit
 
 // MARK: - ScreenCaptureService
 
-/// Captures a single full-screen frame from the main display using
+/// Captures a single full-screen frame from the active display using
 /// ScreenCaptureKit's one-shot screenshot API (macOS 14+).
 ///
 /// Permission note:
@@ -32,7 +32,7 @@ final class ScreenCaptureService {
 
     // MARK: - Public API
 
-    /// Captures the primary display as a single frame.
+    /// Captures the display the user is actively on (mouse cursor screen), not always the primary monitor.
     /// Throws `CaptureError` if permission is denied or capture fails.
     func captureScreen() async throws -> NSImage {
         // SCShareableContent.current is the permission gate.
@@ -44,7 +44,7 @@ final class ScreenCaptureService {
             throw CaptureError.permissionDenied(error.localizedDescription)
         }
 
-        guard let display = content.displays.first else {
+        guard let display = displayForCapture(in: content) else {
             throw CaptureError.noDisplayFound
         }
 
@@ -78,5 +78,45 @@ final class ScreenCaptureService {
             cgImage: cgImage,
             size: NSSize(width: cgImage.width, height: cgImage.height)
         )
+    }
+
+    // MARK: - Display selection
+
+    /// Picks the monitor under the cursor, then Oopla's window screen, then the menu-bar screen.
+    private func displayForCapture(in content: SCShareableContent) -> SCDisplay? {
+        let displays = content.displays
+        guard !displays.isEmpty else { return nil }
+
+        if let screen = screenContainingMouse(),
+           let match = displayMatching(screen: screen, in: displays) {
+            return match
+        }
+
+        if let windowScreen = NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen,
+           let match = displayMatching(screen: windowScreen, in: displays) {
+            return match
+        }
+
+        if let main = NSScreen.main,
+           let match = displayMatching(screen: main, in: displays) {
+            return match
+        }
+
+        return displays.first
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+    }
+
+    private func displayMatching(screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
+        guard
+            let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else {
+            return nil
+        }
+        let displayID = CGDirectDisplayID(truncating: screenNumber)
+        return displays.first { $0.displayID == displayID }
     }
 }

@@ -118,7 +118,7 @@ struct RootView: View {
         guard let w = mainWindow else { return }
         // Re-apply every time because WindowGroup may restore chrome.
         applyBorderlessStyle(to: w)
-        guard let screen = w.screen ?? NSScreen.main else { return }
+        guard let screen = screenContainingMouse() ?? w.screen ?? NSScreen.main else { return }
         let sz = w.frame
         let x = screen.visibleFrame.midX - sz.width / 2
         // Centered horizontally, about 20% down from top (Spotlight-like).
@@ -169,5 +169,10 @@ struct RootView: View {
             NotificationCenter.default.removeObserver(observer)
             resignObserver = nil
         }
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
     }
 }
