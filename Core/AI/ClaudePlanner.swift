@@ -32,7 +32,7 @@ final class ClaudePlanner: PlannerProviding {
     private let model: String
     private let session: URLSession
 
-    init(apiKey: String, model: String = "claude-sonnet-4-20250514") {
+    init(apiKey: String, model: String = "claude-sonnet-4-6") {
         self.apiKey = apiKey
         self.model = model
         self.session = URLSession.shared
