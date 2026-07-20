@@ -1,6 +1,21 @@
-# Oopla - AI Command Bar for macOS (MVP)
+# Oopla - AI Command Bar for macOS
 
-Oopla is a macOS-first command bar that combines Spotlight-like instant local search with an agent orchestration layer for natural language actions.
+## What is Oopla?
+
+Oopla is an intelligent command bar for macOS that lets you control your computer using natural language. Instead of clicking through menus and apps, just type what you want to do and Oopla figures out how to do it.
+
+**Think of it as:** Spotlight search + AI assistant + automation tool, all in one keyboard-first interface.
+
+**Examples of what you can do:**
+- "Open Chrome and search for coffee shops near me"
+- "Create a folder called Projects on my Desktop"
+- "Find my resume and open it"
+- "Copy the URL reddit.com to clipboard"
+- "Show me all PDFs in Downloads"
+
+Oopla combines instant local search (apps, files, folders) with an AI agent that can plan and execute multi-step actions. It understands your intent, breaks down complex requests into safe steps, and executes them with real-time feedback.
+
+---
 
 ## Current MVP status
 
