@@ -71,6 +71,14 @@ The codebase is organized for modularity and future expansion:
 6. Tool calls execute through `ToolRegistry`.
 7. `ExecutionView` streams progress and result messages.
 
+## Roadmap
+
+### 🚀 Upcoming Features
+
+- **Multi-step workflow chaining** – Execute complex sequences like "find last week's meeting notes, summarize them, and email to the team" in a single command
+- **Plugin marketplace** – Allow third-party developers to build and share custom tools, integrations, and action templates
+- **Cross-device sync** – Sync command history, custom shortcuts, and preferences across all your Macs via iCloud
+
 ## Build and run
 
 Open in Xcode and run the `Oopla` executable target.
